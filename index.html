@@ -6,19 +6,30 @@
   <!-- Retro pixel font -->
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
   <style>
+    /* Basic Reset and Background */
     body {
       margin: 0;
-      background: radial-gradient(circle at center, #F6B17A, #7077A1 70%);
-      font-family: 'Press Start 2P', monospace;
       background: #000;
+      font-family: 'Press Start 2P', monospace;
     }
+    
+    /* Main container takes full viewport height */
+    .container {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    
+    /* Centered menu content */
     .menu-container {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
       text-align: center;
     }
+    
     h1 {
       font-size: 48px;
       margin-bottom: 40px;
@@ -28,10 +39,12 @@
       -webkit-text-fill-color: transparent;
       animation: gradientShift 4s infinite linear;
     }
+    
     @keyframes gradientShift {
       0% { background-position: 0%; }
       100% { background-position: 100%; }
     }
+    
     .button {
       display: inline-block;
       padding: 20px 40px;
@@ -44,24 +57,124 @@
       border-radius: 10px;
       transition: background 0.3s, transform 0.3s;
     }
+    
     .button:hover {
       background: rgba(255, 255, 255, 0.2);
       transform: scale(1.05);
     }
+    
     .button.disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
+    
+    /* Vintage styled footer */
+    footer {
+      text-align: center;
+      padding: 20px 0;
+      font-size: 14px;
+      letter-spacing: 1px;
+      background: linear-gradient(45deg, #FF1944, #FFEF00, #00F1FF, #FF1944);
+      background-size: 400%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: gradientShift 4s infinite linear;
+      text-shadow: 1px 1px 0 #000;
+    }
+    
+    /* AI Difficulty Modal Overlay */
+    #aiModalOverlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.85);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 100;
+    }
+    
+    #aiModalContainer {
+      background: #0A0A2A;
+      padding: 40px;
+      border-radius: 15px;
+      text-align: center;
+      box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+    }
+    
+    #aiModalContainer h2 {
+      margin-bottom: 30px;
+      font-size: 32px;
+      background: linear-gradient(45deg, #FF1944, #FFEF00, #00F1FF, #FF1944);
+      background-size: 400%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: gradientShift 4s infinite linear;
+    }
+    
+    #aiModalContainer .button {
+      margin: 10px;
+    }
+    
+    /* Optional "back" button to close modal */
+    #closeAiModal {
+      display: block;
+      margin-top: 20px;
+      font-size: 16px;
+      color: #fff;
+      text-decoration: underline;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
-  <div class="menu-container">
-    <h1>PING-PONG</h1>
-    <div>
-      <a class="button" href="multiplayer.html">Multiplayer</a>
-      <a class="button" href="ai_player.html">AI Mode</a>
-      <a class="button disabled" onclick="alert('Online mode coming soon!'); return false;">Online</a>
+  <div class="container">
+    <div class="menu-container">
+      <h1>PING-PONG</h1>
+      <div>
+        <a class="button" href="multiplayer.html">Multiplayer</a>
+        <!-- AI Mode button now triggers the modal -->
+        <a class="button" id="aiModeBtn" href="#">AI Mode</a>
+        <a class="button disabled" onclick="alert('Online mode coming soon!'); return false;">Online</a>
+      </div>
+    </div>
+    <footer>
+      © <span id="currentYear"></span> Behzod
+    </footer>
+  </div>
+  
+  <!-- AI Difficulty Modal Overlay -->
+  <div id="aiModalOverlay">
+    <div id="aiModalContainer">
+      <h2>Select Difficulty</h2>
+      <div>
+        <a class="button disabled" onclick="alert('Easy mode coming soon!'); return false;">Easy</a>
+        <a class="button disabled" onclick="alert('Medium mode coming soon!'); return false;">Medium</a>
+        <a class="button" href="ai_player_impossible.html">Impossible</a>
+      </div>
+      <div id="closeAiModal">Back</div>
     </div>
   </div>
+  
+  <script>
+    // Set current year dynamically.
+    document.getElementById("currentYear").innerText = new Date().getFullYear();
+
+    // Show the AI difficulty modal when AI Mode button is clicked.
+    const aiModeBtn = document.getElementById("aiModeBtn");
+    const aiModalOverlay = document.getElementById("aiModalOverlay");
+    const closeAiModal = document.getElementById("closeAiModal");
+
+    aiModeBtn.addEventListener("click", function(e) {
+      e.preventDefault();
+      aiModalOverlay.style.display = "flex";
+    });
+
+    closeAiModal.addEventListener("click", function() {
+      aiModalOverlay.style.display = "none";
+    });
+  </script>
 </body>
 </html>

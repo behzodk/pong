@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Classic Pong - Multiplayer</title>
+  <title>Classic Pong - AI Player</title>
   <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
   <style>
     body {
@@ -14,10 +14,8 @@
     body::before {
       content: "";
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
       background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2N89+7dfwAH/wN+971w/gAAAABJRU5ErkJggg==");
       opacity: 0.05;
       pointer-events: none;
@@ -57,7 +55,7 @@
       position: relative;
       border-radius: 15px;
       overflow: hidden;
-      box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.5);
       z-index: 1;
     }
     #gameBoard::after {
@@ -68,8 +66,8 @@
         180deg,
         transparent,
         transparent 2px,
-        rgba(10,10,42,0.2) 2px,
-        rgba(10,10,42,0.2) 4px
+        rgba(10, 10, 42, 0.2) 2px,
+        rgba(10, 10, 42, 0.2) 4px
       );
       pointer-events: none;
     }
@@ -80,15 +78,21 @@
       top: 0;
       bottom: 0;
       width: 2px;
-      background: repeating-linear-gradient(to bottom, #ffffff, #ffffff 10px, transparent 10px, transparent 20px);
-      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+      background: repeating-linear-gradient(
+        to bottom,
+        #ffffff,
+        #ffffff 10px,
+        transparent 10px,
+        transparent 20px
+      );
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
     }
     .paddle {
       position: absolute;
       width: 10px;
       height: 60px;
       background-color: #ffffff;
-      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
     }
     #leftPaddle {
       left: 20px;
@@ -104,7 +108,7 @@
       height: 10px;
       background-color: #ffffff;
       border-radius: 50%;
-      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+      box-shadow: 0 0 8px rgba(255, 255, 255, 0.5);
       left: calc(50% - 5px);
       top: calc(50% - 5px);
     }
@@ -135,8 +139,7 @@
     }
     #winMessage {
       position: fixed;
-      top: 0;
-      left: 0;
+      top: 0; left: 0;
       width: 100%;
       height: 100%;
       background: rgba(0,0,0,0.8);
@@ -179,36 +182,39 @@
       const leftScoreEl = document.getElementById("leftScore");
       const rightScoreEl = document.getElementById("rightScore");
 
-      let leftScore = 0;
-      let rightScore = 0;
+      let aiScore = 0;
+      let playerScore = 0;
       let gameOver = false;
-      
+
       const ballSize = 10;
       const initialSpeedX = 3;
       const initialSpeedY = 2;
-      
       let ballX, ballY, ballVelocityX, ballVelocityY;
       const accelerationFactor = 1.06;
       const paddleSpeed = 7;
       
       let leftPaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
       let rightPaddleY = gameBoard.clientHeight / 2 - rightPaddle.offsetHeight / 2;
-      
+
       let serveCounter = 0;
-      let currentServer = "left";
-      
+      let currentServer = "AI";
+
       const keys = {};
       document.addEventListener("keydown", (e) => {
-        keys[e.key] = true;
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          keys[e.key] = true;
+        }
       });
       document.addEventListener("keyup", (e) => {
-        keys[e.key] = false;
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          keys[e.key] = false;
+        }
       });
-      
+
       function resetBall() {
         ballX = gameBoard.clientWidth / 2 - ballSize / 2;
         ballY = gameBoard.clientHeight / 2 - ballSize / 2;
-        if (currentServer === "left") {
+        if (currentServer === "AI") {
           ballVelocityX = initialSpeedX;
         } else {
           ballVelocityX = -initialSpeedX;
@@ -216,10 +222,10 @@
         ballVelocityY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
         serveCounter++;
         if (serveCounter % 2 === 0) {
-          currentServer = (currentServer === "left") ? "right" : "left";
+          currentServer = (currentServer === "AI") ? "Player" : "AI";
         }
       }
-      
+
       function endGame(winner) {
         gameOver = true;
         const winDiv = document.createElement("div");
@@ -230,29 +236,27 @@
           window.location.href = "index.html";
         }, 5000);
       }
-      
+
       resetBall();
-      
+
       function update() {
         if (gameOver) return;
         
-        if (keys["w"] || keys["W"]) {
-          leftPaddleY -= paddleSpeed;
-        }
-        if (keys["s"] || keys["S"]) {
-          leftPaddleY += paddleSpeed;
-        }
         if (keys["ArrowUp"]) {
           rightPaddleY -= paddleSpeed;
         }
         if (keys["ArrowDown"]) {
           rightPaddleY += paddleSpeed;
         }
-        leftPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - leftPaddle.offsetHeight, leftPaddleY));
         rightPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - rightPaddle.offsetHeight, rightPaddleY));
-        leftPaddle.style.top = leftPaddleY + "px";
         rightPaddle.style.top = rightPaddleY + "px";
-        
+
+        if (ballVelocityX < 0) {
+          leftPaddleY = ballY - leftPaddle.offsetHeight / 2;
+          leftPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - leftPaddle.offsetHeight, leftPaddleY));
+        }
+        leftPaddle.style.top = leftPaddleY + "px";
+
         let maxStep = 5;
         let steps = Math.ceil(Math.max(Math.abs(ballVelocityX), Math.abs(ballVelocityY)) / maxStep);
         for (let i = 0; i < steps; i++) {
@@ -271,61 +275,55 @@
           
           const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
           if (ballX + ballSize >= rightPaddleX && 
-              ballX + ballSize - stepX < rightPaddleX &&
-              ballY + ballSize >= rightPaddleY &&
-              ballY <= rightPaddleY + rightPaddle.offsetHeight) {
+              ballX + ballSize - stepX < rightPaddleX && 
+              ballY + ballSize >= rightPaddleY && ballY <= rightPaddleY + rightPaddle.offsetHeight) {
             let paddleCenter = rightPaddleY + rightPaddle.offsetHeight / 2;
             let ballCenter = ballY + ballSize / 2;
             let offset = (ballCenter - paddleCenter) / (rightPaddle.offsetHeight / 2);
-            const deflectionFactor = 1.5;
+            const deflectionFactor = 3;
             ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
-            const maxVerticalSpeed = 5;
-            ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
             ballVelocityX = -Math.abs(ballVelocityX) * accelerationFactor;
             ballX = rightPaddleX - ballSize;
           }
           
-          if (ballX <= 20 + leftPaddle.offsetWidth &&
+          if (ballX <= 20 + leftPaddle.offsetWidth && 
               ballX - stepX > 20 &&
-              ballY + ballSize >= leftPaddleY &&
-              ballY <= leftPaddleY + leftPaddle.offsetHeight) {
+              ballY + ballSize >= leftPaddleY && ballY <= leftPaddleY + leftPaddle.offsetHeight) {
             let paddleCenter = leftPaddleY + leftPaddle.offsetHeight / 2;
             let ballCenter = ballY + ballSize / 2;
             let offset = (ballCenter - paddleCenter) / (leftPaddle.offsetHeight / 2);
-            const deflectionFactor = 1.5;
+            const deflectionFactor = 3;
             ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
-            const maxVerticalSpeed = 5;
-            ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
             ballVelocityX = Math.abs(ballVelocityX) * accelerationFactor;
             ballX = 20 + leftPaddle.offsetWidth;
           }
         }
-        
+
         if (ballX < 0) {
-          rightScore++;
+          playerScore++;
           resetBall();
         } else if (ballX + ballSize > gameBoard.clientWidth) {
-          leftScore++;
+          aiScore++;
           resetBall();
         }
       
-        leftScoreEl.textContent = leftScore;
-        rightScoreEl.textContent = rightScore;
+        leftScoreEl.textContent = aiScore;
+        rightScoreEl.textContent = playerScore;
         
-        if (leftScore >= 11) {
-          endGame("Left Player");
+        if (aiScore >= 11) {
+          endGame("AI");
           return;
-        } else if (rightScore >= 11) {
-          endGame("Right Player");
+        } else if (playerScore >= 11) {
+          endGame("Player");
           return;
         }
-        
+
         ball.style.left = ballX + "px";
         ball.style.top = ballY + "px";
-        
+
         requestAnimationFrame(update);
       }
-      
+
       requestAnimationFrame(update);
     } else {
       document.body.innerHTML = '<div id="notLaptopMsg">Game is only for laptops</div>';
