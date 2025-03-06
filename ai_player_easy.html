@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Classic Pong - AI Player</title>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    body {
+      margin: 0;
+      background: radial-gradient(circle at center, #F6B17A, #000 70%);
+      position: relative;
+      overflow: hidden;
+    }
+    body::before {
+      content: "";
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2N89+7dfwAH/wN+971w/gAAAABJRU5ErkJggg==");
+      opacity: 0.05;
+      pointer-events: none;
+      z-index: 0;
+    }
+    #gameTitle {
+      position: fixed;
+      top: 15%;
+      left: 50%;
+      transform: translateX(-50%);
+      text-align: center;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 24px;
+      letter-spacing: 3px;
+      background: linear-gradient(45deg, #FF1944, #FFEF00, #00F1FF, #FF1944);
+      background-size: 400%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      animation: gradientShift 4s infinite linear;
+      text-shadow: 1px 1px 0 #000;
+      z-index: 2;
+    }
+    @keyframes gradientShift {
+      0% { background-position: 0%; }
+      100% { background-position: 100%; }
+    }
+    #contentWrapper {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    #gameBoard {
+      width: 800px;
+      height: 400px;
+      background-color: #0A0A2A;
+      position: relative;
+      border-radius: 15px;
+      overflow: hidden;
+      box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
+      z-index: 1;
+    }
+    #gameBoard::after {
+      content: "";
+      position: absolute;
+      top: 0; 
+      left: 0; 
+      right: 0; 
+      bottom: 0;
+      background: repeating-linear-gradient(
+        180deg,
+        transparent,
+        transparent 2px,
+        rgba(10,10,42,0.2) 2px,
+        rgba(10,10,42,0.2) 4px
+      );
+      pointer-events: none;
+    }
+    #centerLine {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: repeating-linear-gradient(
+        to bottom,
+        #ffffff,
+        #ffffff 10px,
+        transparent 10px,
+        transparent 20px
+      );
+      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+    }
+    .paddle {
+      position: absolute;
+      width: 10px;
+      height: 60px;
+      background-color: #ffffff;
+      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+    }
+    /* Left paddle (AI-controlled) -- no key controls for this side */
+    #leftPaddle {
+      left: 20px;
+      top: calc(50% - 30px);
+    }
+    /* Right paddle (Player-controlled) */
+    #rightPaddle {
+      right: 20px;
+      top: calc(50% - 30px);
+    }
+    #ball {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      background-color: #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 0 8px rgba(255,255,255,0.5);
+      left: calc(50% - 5px);
+      top: calc(50% - 5px);
+    }
+    #scoreBoard {
+      position: absolute;
+      top: 50px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      justify-content: space-between;
+      width: 180px;
+      font-family: 'Press Start 2P', monospace;
+      color: #ffffff;
+      text-shadow: 0 0 8px rgba(255,255,255,0.5);
+      z-index: 2;
+    }
+    #scoreBoard > div {
+      font-size: 16px;
+    }
+    #notLaptopMsg {
+      color: #fff;
+      font-size: 24px;
+      text-align: center;
+      margin-top: 40vh;
+      font-family: sans-serif;
+      z-index: 3;
+      position: relative;
+    }
+    #winMessage {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.8);
+      color: #fff;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 32px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 10;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="gameTitle">PING-PONG</div>
+  <div id="contentWrapper">
+    <div id="gameBoard">
+      <div id="scoreBoard">
+        <div id="leftScore">0</div>
+        <div id="rightScore">0</div>
+      </div>
+      <div id="centerLine"></div>
+      <div class="paddle" id="leftPaddle"></div>
+      <div class="paddle" id="rightPaddle"></div>
+      <div id="ball"></div>
+    </div>
+  </div>
+  
+  <script>
+    // Only allow game on non-mobile devices.
+    function isLaptop() {
+      return !(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+    }
+    
+    if (isLaptop()) {
+      const gameBoard = document.getElementById("gameBoard");
+      const leftPaddle = document.getElementById("leftPaddle");     // AI paddle
+      const rightPaddle = document.getElementById("rightPaddle");   // Player paddle
+      const ball = document.getElementById("ball");
+      const leftScoreEl = document.getElementById("leftScore");
+      const rightScoreEl = document.getElementById("rightScore");
+
+      let aiScore = 0;
+      let playerScore = 0;
+      let gameOver = false;
+      
+      // Parameters for ball and paddle.
+      const ballSize = 10;
+      const initialSpeedX = 3;
+      const initialSpeedY = 2;
+      let ballX, ballY, ballVelocityX, ballVelocityY;
+      const accelerationFactor = 1.06;
+      const paddleSpeed = 7;
+      
+      // Use AI control for left paddle:
+      let leftPaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
+      // Player control for right paddle (arrow keys):
+      let rightPaddleY = gameBoard.clientHeight / 2 - rightPaddle.offsetHeight / 2;
+      
+      // Serve management: alternating serve every two serves.
+      let serveCounter = 0;
+      let currentServer = "AI"; // "AI" or "Player"
+      
+      // Keys for player control (only right paddle now).
+      const keys = {};
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          keys[e.key] = true;
+        }
+      });
+      document.addEventListener("keyup", (e) => {
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          keys[e.key] = false;
+        }
+      });
+      
+      function resetBall() {
+        ballX = gameBoard.clientWidth / 2 - ballSize / 2;
+        ballY = gameBoard.clientHeight / 2 - ballSize / 2;
+        if (currentServer === "AI") {
+          // When AI serves, ball goes to Player.
+          ballVelocityX = initialSpeedX;
+        } else {
+          // When Player serves, ball goes to AI.
+          ballVelocityX = -initialSpeedX;
+        }
+        ballVelocityY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
+        serveCounter++;
+        if (serveCounter % 2 === 0) {
+          currentServer = (currentServer === "AI") ? "Player" : "AI";
+        }
+      }
+      
+      function endGame(winner) {
+        gameOver = true;
+        const winDiv = document.createElement("div");
+        winDiv.id = "winMessage";
+        winDiv.textContent = winner + " wins!";
+        document.body.appendChild(winDiv);
+        setTimeout(() => {
+          window.location.href = "index.html";
+        }, 5000);
+      }
+      
+      resetBall();
+      
+      function update() {
+        if (gameOver) return;
+        
+        // --- Player Paddle Movement (Right Paddle) ---
+        if (keys["ArrowUp"]) {
+          rightPaddleY -= paddleSpeed;
+        }
+        if (keys["ArrowDown"]) {
+          rightPaddleY += paddleSpeed;
+        }
+        rightPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - rightPaddle.offsetHeight, rightPaddleY));
+        rightPaddle.style.top = rightPaddleY + "px";
+        
+        // --- AI Paddle Movement (Left Paddle, Medium AI) ---
+        // For medium difficulty, the AI moves gradually toward the ball's vertical position.
+        if (ballVelocityX < 0) { // Only when ball is moving toward AI.
+          let desiredPosition = ballY - leftPaddle.offsetHeight / 2;
+          // Use a moderate reaction rate (e.g., 0.08). Adjust as needed.
+          leftPaddleY += (desiredPosition - leftPaddleY) * 0.08;
+          leftPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - leftPaddle.offsetHeight, leftPaddleY));
+        }
+        leftPaddle.style.top = leftPaddleY + "px";
+        
+        // --- Sub-Stepped Ball Movement for Accurate Collision ---
+        let maxStep = 5;
+        let steps = Math.ceil(Math.max(Math.abs(ballVelocityX), Math.abs(ballVelocityY)) / maxStep);
+        for (let i = 0; i < steps; i++) {
+          let stepX = ballVelocityX / steps;
+          let stepY = ballVelocityY / steps;
+          ballX += stepX;
+          ballY += stepY;
+          
+          // Bounce off top/bottom boundaries.
+          if (ballY <= 0) {
+            ballY = 0;
+            ballVelocityY = -ballVelocityY;
+          } else if (ballY + ballSize >= gameBoard.clientHeight) {
+            ballY = gameBoard.clientHeight - ballSize;
+            ballVelocityY = -ballVelocityY;
+          }
+          
+          // --- Collision with Right Paddle (Player) ---
+          const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
+          if (ballX + ballSize >= rightPaddleX &&
+              ballX + ballSize - stepX < rightPaddleX &&
+              ballY + ballSize >= rightPaddleY &&
+              ballY <= rightPaddleY + rightPaddle.offsetHeight) {
+            let paddleCenter = rightPaddleY + rightPaddle.offsetHeight / 2;
+            let ballCenter = ballY + ballSize / 2;
+            let offset = (ballCenter - paddleCenter) / (rightPaddle.offsetHeight / 2);
+            // Reduced deflection factor for moderated angles.
+            const deflectionFactor = 1.5;
+            ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
+            const maxVerticalSpeed = 5;
+            ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
+            ballVelocityX = -Math.abs(ballVelocityX) * accelerationFactor;
+            ballX = rightPaddleX - ballSize;
+          }
+          
+          // --- Collision with Left Paddle (AI) ---
+          if (ballX <= 20 + leftPaddle.offsetWidth &&
+              ballX - stepX > 20 &&
+              ballY + ballSize >= leftPaddleY &&
+              ballY <= leftPaddleY + leftPaddle.offsetHeight) {
+            let paddleCenter = leftPaddleY + leftPaddle.offsetHeight / 2;
+            let ballCenter = ballY + ballSize / 2;
+            let offset = (ballCenter - paddleCenter) / (leftPaddle.offsetHeight / 2);
+            const deflectionFactor = 1.5;
+            ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
+            const maxVerticalSpeed = 5;
+            ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
+            ballVelocityX = Math.abs(ballVelocityX) * accelerationFactor;
+            ballX = 20 + leftPaddle.offsetWidth;
+          }
+        }
+        
+        // --- Scoring ---
+        if (ballX < 0) {
+          playerScore++;
+          resetBall();
+        } else if (ballX + ballSize > gameBoard.clientWidth) {
+          aiScore++;
+          resetBall();
+        }
+      
+        leftScoreEl.textContent = aiScore;
+        rightScoreEl.textContent = playerScore;
+        
+        if (aiScore >= 11) {
+          endGame("AI");
+          return;
+        } else if (playerScore >= 11) {
+          endGame("Player");
+          return;
+        }
+        
+        ball.style.left = ballX + "px";
+        ball.style.top = ballY + "px";
+        
+        requestAnimationFrame(update);
+      }
+      
+      requestAnimationFrame(update);
+    } else {
+      document.body.innerHTML = '<div id="notLaptopMsg">Game is only for laptops</div>';
+    }
+  </script>
+</body>
+</html>
