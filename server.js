@@ -186,8 +186,9 @@ function createInitialState() {
 }
 
 function createRoom() {
-  return {
-    id: createRoomId(),
+  const roomId = createRoomId();
+  const room = {
+    id: roomId,
     players: { left: null, right: null },
     inputs: { left: defaultInputPacket(), right: defaultInputPacket() },
     started: false,
@@ -196,6 +197,8 @@ function createRoom() {
     sequence: 0,
     history: [],
   };
+  rooms.set(roomId, room);
+  return room;
 }
 
 function getRoom(connection) {
@@ -230,7 +233,6 @@ function handleCreateRoom(connection) {
   leaveRoom(connection);
 
   const room = createRoom();
-  rooms.set(room.id, room);
 
   room.players.left = connection;
   connection.roomId = room.id;
@@ -482,6 +484,7 @@ function handleMessage(connection, rawMessage) {
     case 'ping':
       connection.sendJSON({
         type: 'pong',
+        id: message.id || null,
         clientTime: message.clientTime || null,
         serverTime: Date.now(),
       });

@@ -587,6 +587,24 @@
         return lastRemoteInput[role];
       }
 
+      function lookupInput(role, frame) {
+        if (role === playerRole) {
+          return localInputBuffer.get(frame) || lastLocalInput;
+        }
+        return remoteInputBuffer[role].get(frame) || lastRemoteInput[role];
+      }
+
+      function statesDiffer(localState, snapshot) {
+        if (!localState || !snapshot) return true;
+        if (Math.abs(localState.ballX - snapshot.ballX) > CORRECTION_THRESHOLD_BALL) return true;
+        if (Math.abs(localState.ballY - snapshot.ballY) > CORRECTION_THRESHOLD_BALL) return true;
+        if (Math.abs(localState.leftY - snapshot.leftPaddleY) > CORRECTION_THRESHOLD) return true;
+        if (Math.abs(localState.rightY - snapshot.rightPaddleY) > CORRECTION_THRESHOLD) return true;
+        if (localState.leftScore !== snapshot.leftScore) return true;
+        if (localState.rightScore !== snapshot.rightScore) return true;
+        return false;
+      }
+
       function trimInputBuffers(frameThreshold) {
         while (localInputOrder.length && localInputOrder[0] < frameThreshold) {
           const oldest = localInputOrder.shift();
@@ -622,6 +640,10 @@
           recordRemoteInput('right', snapshot.rightInputFrame || snapshot.frame || 0, snapshot.rightInput);
         }
         syncViewState();
+      }
+
+      function applySnapshotToSim(snapshot) {
+        Object.assign(simState, createSimState(snapshot));
       }
 
       function runLocalSimulation() {
@@ -871,17 +893,18 @@
       function startInputLoop() {
         if (inputLoopId) return;
         inputLoopId = window.setInterval(() => {
-          if (!socketReady || !roomId || !playerRole || !matchActive) return;
-          if (!socket || socket.readyState !== WebSocket.OPEN) return;
-          socket.send(JSON.stringify({
-            type: 'input',
-            roomId,
-            frame: simFrame,
-            role: playerRole,
-            up: Boolean(currentInput.up),
-            down: Boolean(currentInput.down),
-          }));
-        }, PADDLE_TICK_MS);
+        if (!socketReady || !roomId || !playerRole || !matchActive) return;
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const targetFrame = simFrame + INPUT_DELAY_FRAMES;
+        socket.send(JSON.stringify({
+          type: 'input',
+          roomId,
+          frame: targetFrame,
+          role: playerRole,
+          up: Boolean(currentInput.up),
+          down: Boolean(currentInput.down),
+        }));
+      }, PADDLE_TICK_MS);
       }
 
       function stopInputLoop() {
@@ -1098,51 +1121,6 @@
         return Math.max(min, Math.min(max, value));
       }
 
-      function runLocalSimulation() {
-        const now = performance.now();
-        if (lastUpdateTime == null) {
-          lastUpdateTime = now;
-          return;
-        }
-        let delta = now - lastUpdateTime;
-        if (delta > 200) delta = 200;
-        lastUpdateTime = now;
-        simAccumulator += delta;
-
-        while (simAccumulator >= SIM_DT_MS) {
-          simAccumulator -= SIM_DT_MS;
-          simFrame += 1;
-          const leftInput = getInputForFrame('left', simFrame);
-          const rightInput = getInputForFrame('right', simFrame);
-          stepSimulation(simState, leftInput, rightInput);
-          storeStateHistory(simState);
-        }
-
-        trimInputBuffers(simFrame - MAX_ROLLBACK_FRAMES);
-        syncViewState();
-      }
-
-      function stepSimulation(state, leftInput, rightInput) {
-        const axisLeft = inputToAxis(leftInput);
-        const axisRight = inputToAxis(rightInput);
-        state.leftY += axisLeft * paddleSpeed;
-        state.rightY += axisRight * paddleSpeed;
-        const limit = gameBoard.clientHeight - leftPaddle.offsetHeight;
-        state.leftY = clamp(state.leftY, 0, limit);
-        state.rightY = clamp(state.rightY, 0, limit);
-
-        state.ballX += ballVelocityX;
-        state.ballY += ballVelocityY;
-
-        if (state.ballY <= 0) {
-          state.ballY = 0;
-          state.ballVY = Math.abs(state.ballVY);
-        } else if (state.ballY + ballSize >= gameBoard.clientHeight) {
-          state.ballY = gameBoard.clientHeight - ballSize;
-          state.ballVY = -Math.abs(state.ballVY);
-        }
-      }
-
       function updatePaddlePositions() {
         leftPaddle.style.top = `${renderLeftPaddleY}px`;
         rightPaddle.style.top = `${renderRightPaddleY}px`;
@@ -1228,24 +1206,9 @@
         if (typeof state.ballVY === 'number') {
           ballVelocityY = state.ballVY;
         }
-        if (playerRole === 'left' && state.rightInput) {
-          remoteInputState.up = Boolean(state.rightInput.up);
-          remoteInputState.down = Boolean(state.rightInput.down);
-        } else if (playerRole === 'right' && state.leftInput) {
-          remoteInputState.up = Boolean(state.leftInput.up);
-          remoteInputState.down = Boolean(state.leftInput.down);
-        }
-        if (
-          typeof state.ballX === 'number' &&
-          typeof state.ballY === 'number' &&
-          stateSnapshots.length === 1
-        ) {
-          ballX = state.ballX;
-          ballY = state.ballY;
-          renderBallX = state.ballX;
-          renderBallY = state.ballY;
-          updateBallPosition();
-        }
+        recordRemoteInput('left', state.leftInputFrame || state.frame || 0, state.leftInput);
+        recordRemoteInput('right', state.rightInputFrame || state.frame || 0, state.rightInput);
+        reconcileAuthoritativeSnapshot(state);
         if (state.gameOver && !gameOver) {
           gameOver = true;
           matchActive = false;
@@ -1254,6 +1217,42 @@
           winnerLabel = state.winner || 'Player';
           showWinMessage(`${winnerLabel} wins!`);
         }
+      }
+
+      function reconcileAuthoritativeSnapshot(snapshot) {
+        if (!snapshot || typeof snapshot.frame !== 'number') return;
+        const targetFrame = snapshot.frame;
+        const stored = stateHistory.get(targetFrame);
+        const mismatch = !stored || statesDiffer(stored, snapshot);
+        if (!mismatch) return;
+
+        correctionsApplied += 1;
+        const previousFrame = simFrame;
+        applySnapshotToSim(snapshot);
+        simFrame = targetFrame;
+        simAccumulator = 0;
+        lastUpdateTime = performance.now();
+
+        while (historyOrder.length && historyOrder[historyOrder.length - 1] > targetFrame) {
+          const removed = historyOrder.pop();
+          stateHistory.delete(removed);
+        }
+        storeStateHistory(simState);
+
+        if (previousFrame > targetFrame) {
+          for (let frame = targetFrame + 1; frame <= previousFrame; frame += 1) {
+            const leftInput = lookupInput('left', frame);
+            const rightInput = lookupInput('right', frame);
+            stepSimulation(simState, leftInput, rightInput);
+            storeStateHistory(simState);
+            simFrame = frame;
+          }
+        }
+
+        trimInputBuffers(simFrame - MAX_ROLLBACK_FRAMES);
+        syncViewState();
+        runGuestSpeculativeCollisions();
+        updateBallPosition();
       }
 
       function predictRemoteState() {
