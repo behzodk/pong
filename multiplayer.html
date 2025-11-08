@@ -330,21 +330,45 @@
       let socketReady = false;
       let roomId = roomFromUrl ? roomFromUrl.toUpperCase() : null;
       let playerRole = null;
-      let isHost = false;
       let gameInitialized = false;
       let gameStarted = false;
-      let lastSentPaddleY = null;
+      let matchActive = false;
 
       const keys = {};
       let controlsBound = false;
+      let currentInput = { up: false, down: false };
+      let inputLoopId = null;
 
       const ballSize = 10;
-      const initialSpeedX = 3;
-      const initialSpeedY = 2;
-      const accelerationFactor = 1.06;
-      const paddleSpeed = 7;
+      const BOARD_WIDTH = 800;
+      const BOARD_HEIGHT = 400;
+      const PADDLE_WIDTH = 10;
+      const PADDLE_HEIGHT = 60;
+      const PADDLE_MARGIN = 20;
+      const initialSpeedX = 280;
+      const initialSpeedY = 200;
+      const accelerationFactor = 1.04;
+      const paddleSpeedPerSec = 420;
       const maxScore = 11;
       const paddleLagPadding = 12; // compensate for network delay on remote paddle collisions
+      const NETWORK_TICK_RATE = 60;
+      const STATE_TICK_MS = 1000 / NETWORK_TICK_RATE;
+      const PADDLE_TICK_MS = STATE_TICK_MS;
+      const SIM_TICK_RATE = 120;
+      const SIM_DT_MS = 1000 / SIM_TICK_RATE;
+      const SIM_DT_S = SIM_DT_MS / 1000;
+      const INPUT_DELAY_FRAMES = 2;
+      const MAX_ROLLBACK_FRAMES = 12;
+      const SNAPSHOT_BASE_BUFFER_MS = 200;
+      const MAX_PREDICTION_MS = 80;
+      const FRAME_TIME_MS = 1000 / 60;
+      const OPPONENT_LERP_FACTOR = 0.2;
+      const MAX_SNAPSHOTS = 20;
+      const PING_INTERVAL_MS = 1000;
+      const METRICS_WINDOW = 20;
+      const MAX_HISTORY_FRAMES = MAX_ROLLBACK_FRAMES * 4;
+      const CORRECTION_THRESHOLD = 4;
+      const CORRECTION_THRESHOLD_BALL = 6;
 
       let leftScore = 0;
       let rightScore = 0;
@@ -352,12 +376,44 @@
       let winnerLabel = '';
       let ballX = gameBoard.clientWidth / 2 - ballSize / 2;
       let ballY = gameBoard.clientHeight / 2 - ballSize / 2;
+      let renderBallX = ballX;
+      let renderBallY = ballY;
       let ballVelocityX = initialSpeedX;
       let ballVelocityY = initialSpeedY;
       let leftPaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
       let rightPaddleY = gameBoard.clientHeight / 2 - rightPaddle.offsetHeight / 2;
-      let serveCounter = 0;
-      let currentServer = 'left';
+      let renderLeftPaddleY = leftPaddleY;
+      let renderRightPaddleY = rightPaddleY;
+      let lastLocalInput = { up: false, down: false };
+      let simAccumulator = 0;
+      let lastUpdateTime = null;
+      let dynamicSnapshotDelay = SNAPSHOT_BASE_BUFFER_MS;
+      let pingTimer = null;
+      let lastPingSentAt = 0;
+      const pendingPings = new Map();
+      let pingCounter = 0;
+      const rttSamples = [];
+      const jitterSamples = [];
+      let rttEstimate = 120;
+      let jitterEstimate = 10;
+      let lastRttValue = null;
+
+      const stateSnapshots = [];
+      let latestSnapshot = null;
+      const simState = createSimState();
+      let simFrame = 0;
+      const stateHistory = new Map();
+      const historyOrder = [];
+      const localInputBuffer = new Map();
+      const localInputOrder = [];
+      const remoteInputBuffer = { left: new Map(), right: new Map() };
+      const remoteInputOrder = { left: [], right: [] };
+      const lastRemoteInput = {
+        left: { up: false, down: false },
+        right: { up: false, down: false },
+      };
+      let correctionsApplied = 0;
+      const MAX_BUFFERED_INPUTS = MAX_ROLLBACK_FRAMES * 6;
 
       setLobbyControlsDisabled(true);
 
@@ -419,6 +475,275 @@
         }, 1200);
       }
 
+      function createSimState(snapshot = null) {
+        const baseBallX = gameBoard.clientWidth / 2 - ballSize / 2;
+        const baseBallY = gameBoard.clientHeight / 2 - ballSize / 2;
+        const basePaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
+        const source = snapshot || {};
+        return {
+          frame: source.frame || 0,
+          ballX: typeof source.ballX === 'number' ? source.ballX : baseBallX,
+          ballY: typeof source.ballY === 'number' ? source.ballY : baseBallY,
+          ballVX: typeof source.ballVX === 'number' ? source.ballVX : initialSpeedX,
+          ballVY: typeof source.ballVY === 'number' ? source.ballVY : initialSpeedY,
+          leftY: typeof source.leftPaddleY === 'number' ? source.leftPaddleY : basePaddleY,
+          rightY: typeof source.rightPaddleY === 'number' ? source.rightPaddleY : basePaddleY,
+          leftScore: typeof source.leftScore === 'number' ? source.leftScore : 0,
+          rightScore: typeof source.rightScore === 'number' ? source.rightScore : 0,
+          gameOver: Boolean(source.gameOver),
+          winner: source.winner || null,
+        };
+      }
+
+      function cloneSimState(state) {
+        return {
+          frame: state.frame,
+          ballX: state.ballX,
+          ballY: state.ballY,
+          ballVX: state.ballVX,
+          ballVY: state.ballVY,
+          leftY: state.leftY,
+          rightY: state.rightY,
+          leftScore: state.leftScore,
+          rightScore: state.rightScore,
+          gameOver: state.gameOver,
+          winner: state.winner,
+        };
+      }
+
+      function syncViewState() {
+        leftPaddleY = simState.leftY;
+        rightPaddleY = simState.rightY;
+        renderLeftPaddleY = leftPaddleY;
+        renderRightPaddleY = rightPaddleY;
+        ballX = simState.ballX;
+        ballY = simState.ballY;
+        ballVelocityX = simState.ballVX;
+        ballVelocityY = simState.ballVY;
+        renderBallX = ballX;
+        renderBallY = ballY;
+        leftScore = simState.leftScore;
+        rightScore = simState.rightScore;
+        leftScoreEl.textContent = leftScore;
+        rightScoreEl.textContent = rightScore;
+        opponentTargets.left = leftPaddleY;
+        opponentTargets.right = rightPaddleY;
+      }
+
+      function storeStateHistory(state) {
+        const copy = cloneSimState(state);
+        stateHistory.set(copy.frame, copy);
+        historyOrder.push(copy.frame);
+        while (historyOrder.length > MAX_HISTORY_FRAMES) {
+          const oldest = historyOrder.shift();
+          stateHistory.delete(oldest);
+        }
+      }
+
+      function recordLocalInput(frame, input) {
+        lastLocalInput = { ...input };
+        localInputBuffer.set(frame, { ...input });
+        localInputOrder.push(frame);
+        while (localInputOrder.length > MAX_BUFFERED_INPUTS) {
+          const oldest = localInputOrder.shift();
+          localInputBuffer.delete(oldest);
+        }
+      }
+
+      function recordRemoteInput(role, frame, input = {}) {
+        if (!remoteInputBuffer[role]) return;
+        const packet = {
+          up: Boolean(input.up),
+          down: Boolean(input.down),
+        };
+        remoteInputBuffer[role].set(frame, packet);
+        remoteInputOrder[role].push(frame);
+        while (remoteInputOrder[role].length > MAX_BUFFERED_INPUTS) {
+          const oldest = remoteInputOrder[role].shift();
+          remoteInputBuffer[role].delete(oldest);
+        }
+        lastRemoteInput[role] = packet;
+      }
+
+      function inputToAxis(input) {
+        if (!input) return 0;
+        if (input.up && !input.down) return -1;
+        if (input.down && !input.up) return 1;
+        return 0;
+      }
+
+      function getInputForFrame(role, frame) {
+        if (role === playerRole) {
+          if (localInputBuffer.has(frame)) {
+            lastLocalInput = localInputBuffer.get(frame);
+          }
+          return lastLocalInput;
+        }
+        const packet = remoteInputBuffer[role]?.get(frame);
+        if (packet) {
+          lastRemoteInput[role] = packet;
+          return packet;
+        }
+        return lastRemoteInput[role];
+      }
+
+      function trimInputBuffers(frameThreshold) {
+        while (localInputOrder.length && localInputOrder[0] < frameThreshold) {
+          const oldest = localInputOrder.shift();
+          localInputBuffer.delete(oldest);
+        }
+        ['left', 'right'].forEach((role) => {
+          while (remoteInputOrder[role].length && remoteInputOrder[role][0] < frameThreshold) {
+            const oldest = remoteInputOrder[role].shift();
+            remoteInputBuffer[role].delete(oldest);
+          }
+        });
+      }
+
+      function resetSimulation(snapshot) {
+        simAccumulator = 0;
+        lastUpdateTime = null;
+        localInputBuffer.clear();
+        localInputOrder.length = 0;
+        ['left', 'right'].forEach((role) => {
+          remoteInputBuffer[role].clear();
+          remoteInputOrder[role].length = 0;
+          lastRemoteInput[role] = { up: false, down: false };
+        });
+        lastLocalInput = { up: false, down: false };
+        const baseState = createSimState(snapshot);
+        Object.assign(simState, baseState);
+        simFrame = baseState.frame || 0;
+        stateHistory.clear();
+        historyOrder.length = 0;
+        storeStateHistory(simState);
+        if (snapshot) {
+          recordRemoteInput('left', snapshot.leftInputFrame || snapshot.frame || 0, snapshot.leftInput);
+          recordRemoteInput('right', snapshot.rightInputFrame || snapshot.frame || 0, snapshot.rightInput);
+        }
+        syncViewState();
+      }
+
+      function runLocalSimulation() {
+        if (!matchActive || gameOver) return;
+        const now = performance.now();
+        if (lastUpdateTime == null) {
+          lastUpdateTime = now;
+          return;
+        }
+
+        let delta = now - lastUpdateTime;
+        if (delta > 200) delta = 200;
+        lastUpdateTime = now;
+        simAccumulator += delta;
+
+        let advanced = false;
+        while (simAccumulator >= SIM_DT_MS) {
+          simAccumulator -= SIM_DT_MS;
+          const targetFrame = simFrame + 1;
+          const leftInput = getInputForFrame('left', targetFrame);
+          const rightInput = getInputForFrame('right', targetFrame);
+          stepSimulation(simState, leftInput, rightInput);
+          storeStateHistory(simState);
+          simFrame = targetFrame;
+          advanced = true;
+        }
+
+        if (advanced) {
+          trimInputBuffers(simFrame - MAX_ROLLBACK_FRAMES);
+          syncViewState();
+          runGuestSpeculativeCollisions();
+          updateBallPosition();
+        }
+      }
+
+      function stepSimulation(state, leftInput, rightInput) {
+        if (!state) return;
+        state.frame = (state.frame || 0) + 1;
+        if (state.gameOver) return;
+
+        const dt = SIM_DT_S;
+        const paddleDelta = paddleSpeedPerSec * dt;
+
+        const axisLeft = inputToAxis(leftInput);
+        const axisRight = inputToAxis(rightInput);
+        state.leftY += axisLeft * paddleDelta;
+        state.rightY += axisRight * paddleDelta;
+
+        const paddleLimit = BOARD_HEIGHT - PADDLE_HEIGHT;
+        state.leftY = clamp(state.leftY, 0, paddleLimit);
+        state.rightY = clamp(state.rightY, 0, paddleLimit);
+
+        let nextBallX = state.ballX + state.ballVX * dt;
+        let nextBallY = state.ballY + state.ballVY * dt;
+
+        if (nextBallY <= 0) {
+          nextBallY = 0;
+          state.ballVY = Math.abs(state.ballVY);
+        } else if (nextBallY + ballSize >= BOARD_HEIGHT) {
+          nextBallY = BOARD_HEIGHT - ballSize;
+          state.ballVY = -Math.abs(state.ballVY);
+        }
+
+        const rightPaddleX = BOARD_WIDTH - PADDLE_MARGIN - PADDLE_WIDTH;
+        if (
+          state.ballVX > 0 &&
+          nextBallX + ballSize >= rightPaddleX &&
+          nextBallX <= rightPaddleX + PADDLE_WIDTH &&
+          nextBallY + ballSize >= state.rightY &&
+          nextBallY <= state.rightY + PADDLE_HEIGHT
+        ) {
+          nextBallX = rightPaddleX - ballSize;
+          state.ballVX = -Math.abs(state.ballVX);
+          reflectBallState(state, state.rightY);
+        }
+
+        const leftPaddleX = PADDLE_MARGIN;
+        if (
+          state.ballVX < 0 &&
+          nextBallX <= leftPaddleX + PADDLE_WIDTH &&
+          nextBallX + ballSize >= leftPaddleX &&
+          nextBallY + ballSize >= state.leftY &&
+          nextBallY <= state.leftY + PADDLE_HEIGHT
+        ) {
+          nextBallX = leftPaddleX + PADDLE_WIDTH;
+          state.ballVX = Math.abs(state.ballVX);
+          reflectBallState(state, state.leftY);
+        }
+
+        state.ballX = nextBallX;
+        state.ballY = nextBallY;
+
+        if (state.ballX < 0) {
+          state.rightScore += 1;
+          resetBallState(state, 'right');
+        } else if (state.ballX + ballSize > BOARD_WIDTH) {
+          state.leftScore += 1;
+          resetBallState(state, 'left');
+        }
+
+        if (!state.gameOver && (state.leftScore >= maxScore || state.rightScore >= maxScore)) {
+          state.gameOver = true;
+          state.winner = state.leftScore > state.rightScore ? 'Left Player' : 'Right Player';
+        }
+      }
+
+      function reflectBallState(state, paddleY) {
+        const paddleCenter = paddleY + PADDLE_HEIGHT / 2;
+        const ballCenter = state.ballY + ballSize / 2;
+        const offset = (ballCenter - paddleCenter) / (PADDLE_HEIGHT / 2);
+        const deflection = offset * 220;
+        state.ballVY = clamp(state.ballVY * accelerationFactor + deflection, -500, 500);
+        state.ballVX *= accelerationFactor;
+      }
+
+      function resetBallState(state, scorer) {
+        state.ballX = BOARD_WIDTH / 2 - ballSize / 2;
+        state.ballY = BOARD_HEIGHT / 2 - ballSize / 2;
+        state.ballVX = initialSpeedX * (scorer === 'left' ? 1 : -1);
+        state.ballVY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
+      }
+
       function setStatus(message) {
         statusMessage.textContent = message;
       }
@@ -459,7 +784,7 @@
 
         if (forceLocalServer) {
           const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
-          const targetHost = hostname || 'localhost';
+          const targetHost = hostname || 'w';
           const targetPort = port || DEFAULT_LOCAL_PORT;
           debugLog('Server override: local');
           return `${scheme}${targetHost}:${targetPort}`;
@@ -480,6 +805,7 @@
           debugLog('WebSocket open', socket.readyState);
           setStatus('Connected. Create a room or join an existing one.');
           setLobbyControlsDisabled(false);
+          startPingLoop();
           if (roomFromUrl) {
             socket.send(JSON.stringify({ type: 'joinRoom', roomId: roomFromUrl.toUpperCase() }));
             setStatus(`Attempting to join room ${roomFromUrl.toUpperCase()}...`);
@@ -501,6 +827,10 @@
 
         socket.addEventListener('close', (event) => {
           socketReady = false;
+          matchActive = false;
+          gameStarted = false;
+          stopInputLoop();
+          stopPingLoop();
           debugLog('WebSocket close', event.code, event.reason);
           setStatus('Disconnected from server. Refresh the page to reconnect.');
           setLobbyControlsDisabled(true);
@@ -510,7 +840,54 @@
         socket.addEventListener('error', (event) => {
           debugLog('WebSocket error', event);
           setStatus('Connection error. Check the console for details and refresh the page.');
+          stopPingLoop();
         });
+      }
+
+      function startPingLoop() {
+        if (pingTimer || !socket) return;
+        sendPing();
+        pingTimer = window.setInterval(() => {
+          sendPing();
+        }, PING_INTERVAL_MS);
+      }
+
+      function stopPingLoop() {
+        if (pingTimer) {
+          window.clearInterval(pingTimer);
+          pingTimer = null;
+        }
+        pendingPings.clear();
+      }
+
+      function sendPing() {
+        if (!socketReady || !socket || socket.readyState !== WebSocket.OPEN) return;
+        const id = ++pingCounter;
+        pendingPings.set(id, performance.now());
+        lastPingSentAt = Date.now();
+        socket.send(JSON.stringify({ type: 'ping', id, clientTime: lastPingSentAt }));
+      }
+
+      function startInputLoop() {
+        if (inputLoopId) return;
+        inputLoopId = window.setInterval(() => {
+          if (!socketReady || !roomId || !playerRole || !matchActive) return;
+          if (!socket || socket.readyState !== WebSocket.OPEN) return;
+          socket.send(JSON.stringify({
+            type: 'input',
+            roomId,
+            frame: simFrame,
+            role: playerRole,
+            up: Boolean(currentInput.up),
+            down: Boolean(currentInput.down),
+          }));
+        }, PADDLE_TICK_MS);
+      }
+
+      function stopInputLoop() {
+        if (!inputLoopId) return;
+        window.clearInterval(inputLoopId);
+        inputLoopId = null;
       }
 
       function handleServerMessage(message) {
@@ -518,8 +895,6 @@
           case 'roomCreated':
             roomId = message.roomId;
             playerRole = message.role;
-            isHost = true;
-            lastSentPaddleY = null;
             setStatus(`Room ${roomId} created. Waiting for your opponent...`);
             shareLinkContainer.classList.remove('hidden');
             const shareLink = buildShareLink(roomId);
@@ -532,9 +907,7 @@
           case 'roomJoined':
             roomId = message.roomId;
             playerRole = message.role;
-            isHost = message.role === 'left';
-            lastSentPaddleY = null;
-            setStatus('Joined room. Waiting for the host to start the match...');
+            setStatus('Joined room. Waiting for the server to start the match...');
             updateUrlWithRoom(roomId);
             roomIdInput.value = roomId;
             break;
@@ -542,14 +915,17 @@
             setStatus('Opponent connected! Preparing the match...');
             break;
           case 'roomReady':
-            setStatus('Both players are ready. Starting match...');
-            startGame();
+            setStatus('Both players are ready. Waiting for the server...');
             break;
-          case 'opponentMove':
-            applyOpponentMove(message.role, message.y);
+          case 'matchStart':
+            setStatus('Match starting!');
+            beginMatch(message.state);
             break;
-          case 'stateUpdate':
-            applyStateFromHost(message.state);
+          case 'state':
+            handleStateSnapshot(message.state);
+            break;
+          case 'pong':
+            handlePong(message);
             break;
           case 'opponentLeft':
             handleOpponentLeft();
@@ -565,19 +941,48 @@
 
       function handleOpponentLeft() {
         gameOver = true;
+        matchActive = false;
+        gameStarted = false;
+        stopInputLoop();
         if (!document.getElementById('winMessage')) {
           setStatus('Opponent disconnected. Refresh to start a new match.');
           lobbyOverlay.classList.remove('hidden');
         }
       }
 
-      function startGame() {
-        if (gameStarted) return;
+      function handlePong(message) {
+        if (!message || typeof message.id !== 'number') return;
+        const sentAt = pendingPings.get(message.id);
+        if (!sentAt) return;
+        pendingPings.delete(message.id);
+        const rtt = performance.now() - sentAt;
+        rttSamples.push(rtt);
+        if (rttSamples.length > METRICS_WINDOW) rttSamples.shift();
+        if (lastRttValue !== null) {
+          const jitter = Math.abs(rtt - lastRttValue);
+          jitterSamples.push(jitter);
+          if (jitterSamples.length > METRICS_WINDOW) jitterSamples.shift();
+        }
+        lastRttValue = rtt;
+        rttEstimate = averageSamples(rttSamples) || rttEstimate;
+        jitterEstimate = averageSamples(jitterSamples) || jitterEstimate;
+        updateDynamicSnapshotDelay();
+      }
+
+      function beginMatch(snapshot) {
+        matchActive = true;
+        gameOver = false;
+        winnerLabel = '';
+        resetSimulation(snapshot);
         lobbyOverlay.classList.add('hidden');
-        gameStarted = true;
+        syncViewState();
         if (!gameInitialized) {
           initializeGame();
+        } else if (!gameStarted) {
+          requestAnimationFrame(update);
         }
+        gameStarted = true;
+        startInputLoop();
       }
 
       function initializeGame() {
@@ -591,11 +996,14 @@
       function centerGameElements() {
         leftPaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
         rightPaddleY = leftPaddleY;
+        renderLeftPaddleY = leftPaddleY;
+        renderRightPaddleY = rightPaddleY;
         ballX = gameBoard.clientWidth / 2 - ballSize / 2;
         ballY = gameBoard.clientHeight / 2 - ballSize / 2;
+        renderBallX = ballX;
+        renderBallY = ballY;
         updatePaddlePositions();
-        ball.style.left = `${ballX}px`;
-        ball.style.top = `${ballY}px`;
+        updateBallPosition();
       }
 
       function bindControls() {
@@ -618,55 +1026,48 @@
       function update() {
         if (!gameStarted) return;
         handleLocalInput();
+        runLocalSimulation();
+        smoothOpponentPaddles();
         clampPaddles();
         updatePaddlePositions();
 
-        if (isHost && !gameOver) {
-          advanceBall();
-          updateBallPosition();
-          sendStateUpdate();
-        }
-
         if (!gameOver) {
+          predictRemoteState();
           requestAnimationFrame(update);
         }
       }
 
       function handleLocalInput() {
         if (!playerRole) return;
-        const upPressed = keys.w || keys.W || keys.ArrowUp;
-        const downPressed = keys.s || keys.S || keys.ArrowDown;
-        let moved = false;
+        const upPressed = Boolean(keys.w || keys.W || keys.ArrowUp);
+        const downPressed = Boolean(keys.s || keys.S || keys.ArrowDown);
+        currentInput = {
+          up: upPressed,
+          down: downPressed,
+        };
 
-        if (playerRole === 'left') {
-          if (upPressed) {
-            leftPaddleY -= paddleSpeed;
-            moved = true;
-          }
-          if (downPressed) {
-            leftPaddleY += paddleSpeed;
-            moved = true;
-          }
-        } else if (playerRole === 'right') {
-          if (upPressed) {
-            rightPaddleY -= paddleSpeed;
-            moved = true;
-          }
-          if (downPressed) {
-            rightPaddleY += paddleSpeed;
-            moved = true;
-          }
+        const delayedFrame = simFrame + INPUT_DELAY_FRAMES;
+        recordLocalInput(delayedFrame, currentInput);
+      }
+
+      function smoothOpponentPaddles() {
+        if (playerRole !== 'left' && opponentTargets.left !== null) {
+          renderLeftPaddleY = lerp(renderLeftPaddleY, opponentTargets.left, OPPONENT_LERP_FACTOR);
+        } else {
+          renderLeftPaddleY = leftPaddleY;
         }
-
-        if (moved && !isHost) {
-          const y = playerRole === 'left' ? leftPaddleY : rightPaddleY;
-          maybeSendLocalPaddle(y);
+        if (playerRole !== 'right' && opponentTargets.right !== null) {
+          renderRightPaddleY = lerp(renderRightPaddleY, opponentTargets.right, OPPONENT_LERP_FACTOR);
+        } else {
+          renderRightPaddleY = rightPaddleY;
         }
       }
 
       function clampPaddles() {
         leftPaddleY = clampY(leftPaddleY);
         rightPaddleY = clampY(rightPaddleY);
+        renderLeftPaddleY = clampY(renderLeftPaddleY);
+        renderRightPaddleY = clampY(renderRightPaddleY);
       }
 
       function clampY(value) {
@@ -674,88 +1075,98 @@
         return Math.max(0, Math.min(limit, value));
       }
 
+      function lerp(start, end, alpha) {
+        return start + (end - start) * alpha;
+      }
+
+      function averageSamples(list) {
+        if (!list.length) return 0;
+        return list.reduce((sum, value) => sum + value, 0) / list.length;
+      }
+
+      function updateDynamicSnapshotDelay() {
+        const halfRtt = rttEstimate / 2;
+        const jitterMargin = jitterEstimate * 2 + 20;
+        dynamicSnapshotDelay = clamp(
+          halfRtt + jitterMargin,
+          80,
+          400,
+        );
+      }
+
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+
+      function runLocalSimulation() {
+        const now = performance.now();
+        if (lastUpdateTime == null) {
+          lastUpdateTime = now;
+          return;
+        }
+        let delta = now - lastUpdateTime;
+        if (delta > 200) delta = 200;
+        lastUpdateTime = now;
+        simAccumulator += delta;
+
+        while (simAccumulator >= SIM_DT_MS) {
+          simAccumulator -= SIM_DT_MS;
+          simFrame += 1;
+          const leftInput = getInputForFrame('left', simFrame);
+          const rightInput = getInputForFrame('right', simFrame);
+          stepSimulation(simState, leftInput, rightInput);
+          storeStateHistory(simState);
+        }
+
+        trimInputBuffers(simFrame - MAX_ROLLBACK_FRAMES);
+        syncViewState();
+      }
+
+      function stepSimulation(state, leftInput, rightInput) {
+        const axisLeft = inputToAxis(leftInput);
+        const axisRight = inputToAxis(rightInput);
+        state.leftY += axisLeft * paddleSpeed;
+        state.rightY += axisRight * paddleSpeed;
+        const limit = gameBoard.clientHeight - leftPaddle.offsetHeight;
+        state.leftY = clamp(state.leftY, 0, limit);
+        state.rightY = clamp(state.rightY, 0, limit);
+
+        state.ballX += ballVelocityX;
+        state.ballY += ballVelocityY;
+
+        if (state.ballY <= 0) {
+          state.ballY = 0;
+          state.ballVY = Math.abs(state.ballVY);
+        } else if (state.ballY + ballSize >= gameBoard.clientHeight) {
+          state.ballY = gameBoard.clientHeight - ballSize;
+          state.ballVY = -Math.abs(state.ballVY);
+        }
+      }
+
       function updatePaddlePositions() {
-        leftPaddle.style.top = `${leftPaddleY}px`;
-        rightPaddle.style.top = `${rightPaddleY}px`;
+        leftPaddle.style.top = `${renderLeftPaddleY}px`;
+        rightPaddle.style.top = `${renderRightPaddleY}px`;
       }
 
       function updateBallPosition() {
-        ball.style.left = `${ballX}px`;
-        ball.style.top = `${ballY}px`;
+        ball.style.left = `${renderBallX}px`;
+        ball.style.top = `${renderBallY}px`;
       }
 
-      function advanceBall() {
-        const maxStep = 5;
-        const steps = Math.ceil(Math.max(Math.abs(ballVelocityX), Math.abs(ballVelocityY)) / maxStep);
-
-        for (let i = 0; i < steps; i += 1) {
-          const stepX = ballVelocityX / steps;
-          const stepY = ballVelocityY / steps;
-          ballX += stepX;
-          ballY += stepY;
-
-          if (ballY <= 0) {
-            ballY = 0;
-            ballVelocityY = -ballVelocityY;
-          } else if (ballY + ballSize >= gameBoard.clientHeight) {
-            ballY = gameBoard.clientHeight - ballSize;
-            ballVelocityY = -ballVelocityY;
-          }
-
-          const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
-          const rightTop = Math.max(0, rightPaddleY - paddleLagPadding);
-          const rightBottom = Math.min(
-            gameBoard.clientHeight,
-            rightPaddleY + rightPaddle.offsetHeight + paddleLagPadding,
-          );
-          if (
-            ballVelocityX > 0 &&
-            ballX + ballSize >= rightPaddleX &&
-            ballX <= rightPaddleX + rightPaddle.offsetWidth &&
-            ballY + ballSize >= rightTop &&
-            ballY <= rightBottom
-          ) {
-            reflectBall(rightPaddleY, rightPaddle);
-            ballVelocityX = -Math.abs(ballVelocityX) * accelerationFactor;
-            ballX = rightPaddleX - ballSize;
-          }
-
-          const leftCollisionX = 20 + leftPaddle.offsetWidth;
-          const leftTop = Math.max(0, leftPaddleY - paddleLagPadding);
-          const leftBottom = Math.min(
-            gameBoard.clientHeight,
-            leftPaddleY + leftPaddle.offsetHeight + paddleLagPadding,
-          );
-          if (
-            ballVelocityX < 0 &&
-            ballX <= leftCollisionX &&
-            ballX + ballSize >= 20 &&
-            ballY + ballSize >= leftTop &&
-            ballY <= leftBottom
-          ) {
-            reflectBall(leftPaddleY, leftPaddle);
-            ballVelocityX = Math.abs(ballVelocityX) * accelerationFactor;
-            ballX = leftCollisionX;
-          }
-        }
-
-        if (ballX < 0) {
-          rightScore += 1;
-          resetBall();
-        } else if (ballX + ballSize > gameBoard.clientWidth) {
-          leftScore += 1;
-          resetBall();
-        }
-
-        leftScoreEl.textContent = leftScore;
-        rightScoreEl.textContent = rightScore;
-
-        if (leftScore >= maxScore) {
-          concludeGame('Left Player');
-        } else if (rightScore >= maxScore) {
-          concludeGame('Right Player');
-        }
+      function hermiteInterpolate(p0, p1, v0, v1, t, durationSeconds) {
+        const clampedT = Math.min(1, Math.max(0, t));
+        const t2 = clampedT * clampedT;
+        const t3 = t2 * clampedT;
+        const m0 = v0 * durationSeconds;
+        const m1 = v1 * durationSeconds;
+        return (
+          (2 * t3 - 3 * t2 + 1) * p0 +
+          (t3 - 2 * t2 + clampedT) * m0 +
+          (-2 * t3 + 3 * t2) * p1 +
+          (t3 - t2) * m1
+        );
       }
+
 
       function reflectBall(paddleY, paddleEl) {
         const paddleCenter = paddleY + paddleEl.offsetHeight / 2;
@@ -765,26 +1176,6 @@
         ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
         const maxVerticalSpeed = 5;
         ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
-      }
-
-      function resetBall() {
-        if (!isHost) return;
-        ballX = gameBoard.clientWidth / 2 - ballSize / 2;
-        ballY = gameBoard.clientHeight / 2 - ballSize / 2;
-        ballVelocityX = currentServer === 'left' ? initialSpeedX : -initialSpeedX;
-        ballVelocityY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
-        serveCounter += 1;
-        if (serveCounter % 2 === 0) {
-          currentServer = currentServer === 'left' ? 'right' : 'left';
-        }
-      }
-
-      function concludeGame(winner) {
-        if (gameOver) return;
-        gameOver = true;
-        winnerLabel = winner;
-        sendStateUpdate();
-        showWinMessage(`${winner} wins!`);
       }
 
       function showWinMessage(text) {
@@ -798,39 +1189,17 @@
         }, 5000);
       }
 
-      function sendStateUpdate() {
-        if (!isHost || !socketReady || !roomId || socket.readyState !== WebSocket.OPEN) {
+      function handleStateSnapshot(state) {
+        if (!state || typeof state.timestamp !== 'number') return;
+        if (latestSnapshot && state.timestamp <= latestSnapshot.timestamp) {
           return;
         }
-        socket.send(JSON.stringify({
-          type: 'stateUpdate',
-          roomId,
-          state: {
-            ballX,
-            ballY,
-            leftPaddleY,
-            rightPaddleY,
-            leftScore,
-            rightScore,
-            gameOver,
-            winner: winnerLabel,
-          },
-        }));
-      }
-
-      function applyOpponentMove(role, y) {
-        const sanitizedY = clampY(typeof y === 'number' ? y : 0);
-        if (role === 'left') {
-          leftPaddleY = sanitizedY;
-          leftPaddle.style.top = `${leftPaddleY}px`;
-        } else if (role === 'right') {
-          rightPaddleY = sanitizedY;
-          rightPaddle.style.top = `${rightPaddleY}px`;
+        stateSnapshots.push(state);
+        if (stateSnapshots.length > MAX_SNAPSHOTS) {
+          stateSnapshots.shift();
         }
-      }
+        latestSnapshot = state;
 
-      function applyStateFromHost(state) {
-        if (!state) return;
         if (typeof state.leftScore === 'number') {
           leftScore = state.leftScore;
           leftScoreEl.textContent = leftScore;
@@ -839,34 +1208,100 @@
           rightScore = state.rightScore;
           rightScoreEl.textContent = rightScore;
         }
-        if (typeof state.leftPaddleY === 'number' && playerRole !== 'left') {
-          leftPaddleY = clampY(state.leftPaddleY);
-          leftPaddle.style.top = `${leftPaddleY}px`;
+        if (typeof state.leftPaddleY === 'number') {
+          const target = clampY(state.leftPaddleY);
+          if (playerRole !== 'left') {
+            leftPaddleY = target;
+            opponentTargets.left = target;
+          }
         }
-        if (typeof state.rightPaddleY === 'number' && playerRole !== 'right') {
-          rightPaddleY = clampY(state.rightPaddleY);
-          rightPaddle.style.top = `${rightPaddleY}px`;
+        if (typeof state.rightPaddleY === 'number') {
+          const target = clampY(state.rightPaddleY);
+          if (playerRole !== 'right') {
+            rightPaddleY = target;
+            opponentTargets.right = target;
+          }
         }
-        if (typeof state.ballX === 'number' && typeof state.ballY === 'number') {
+        if (typeof state.ballVX === 'number') {
+          ballVelocityX = state.ballVX;
+        }
+        if (typeof state.ballVY === 'number') {
+          ballVelocityY = state.ballVY;
+        }
+        if (playerRole === 'left' && state.rightInput) {
+          remoteInputState.up = Boolean(state.rightInput.up);
+          remoteInputState.down = Boolean(state.rightInput.down);
+        } else if (playerRole === 'right' && state.leftInput) {
+          remoteInputState.up = Boolean(state.leftInput.up);
+          remoteInputState.down = Boolean(state.leftInput.down);
+        }
+        if (
+          typeof state.ballX === 'number' &&
+          typeof state.ballY === 'number' &&
+          stateSnapshots.length === 1
+        ) {
           ballX = state.ballX;
           ballY = state.ballY;
+          renderBallX = state.ballX;
+          renderBallY = state.ballY;
           updateBallPosition();
         }
         if (state.gameOver && !gameOver) {
           gameOver = true;
+          matchActive = false;
+          gameStarted = false;
+          stopInputLoop();
           winnerLabel = state.winner || 'Player';
           showWinMessage(`${winnerLabel} wins!`);
         }
       }
 
-      function maybeSendLocalPaddle(y) {
-        if (!socketReady || !roomId || socket.readyState !== WebSocket.OPEN) return;
-        const sanitized = clampY(y);
-        if (lastSentPaddleY !== null && Math.abs(lastSentPaddleY - sanitized) < 0.5) {
-          return;
+      function predictRemoteState() {
+        // Local rollback simulation drives the render state.
+      }
+
+      function runGuestSpeculativeCollisions() {
+        if (gameOver) return;
+
+        const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
+        const rightTop = Math.max(0, renderRightPaddleY - paddleLagPadding);
+        const rightBottom = Math.min(
+          gameBoard.clientHeight,
+          renderRightPaddleY + rightPaddle.offsetHeight + paddleLagPadding,
+        );
+        if (
+          ballVelocityX > 0 &&
+          renderBallX + ballSize >= rightPaddleX &&
+          renderBallX <= rightPaddleX + rightPaddle.offsetWidth &&
+          renderBallY + ballSize >= rightTop &&
+          renderBallY <= rightBottom
+        ) {
+          ballY = renderBallY;
+          reflectBall(renderRightPaddleY, rightPaddle);
+          ballVelocityX = -Math.abs(ballVelocityX) * accelerationFactor;
+          renderBallX = rightPaddleX - ballSize;
+          ballX = renderBallX;
         }
-        lastSentPaddleY = sanitized;
-        socket.send(JSON.stringify({ type: 'paddleMove', roomId, y: sanitized }));
+
+        const leftCollisionX = 20 + leftPaddle.offsetWidth;
+        const leftTop = Math.max(0, renderLeftPaddleY - paddleLagPadding);
+        const leftBottom = Math.min(
+          gameBoard.clientHeight,
+          renderLeftPaddleY + leftPaddle.offsetHeight + paddleLagPadding,
+        );
+        if (
+          ballVelocityX < 0 &&
+          renderBallX <= leftCollisionX &&
+          renderBallX + ballSize >= 20 &&
+          renderBallY + ballSize >= leftTop &&
+          renderBallY <= leftBottom
+        ) {
+          ballY = renderBallY;
+          reflectBall(renderLeftPaddleY, leftPaddle);
+          ballVelocityX = Math.abs(ballVelocityX) * accelerationFactor;
+          renderBallX = leftCollisionX;
+          ballX = renderBallX;
+        }
       }
 
       connectSocket();

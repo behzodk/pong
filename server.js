@@ -4,21 +4,38 @@ const { EventEmitter } = require('events');
 
 const PORT = process.env.PORT || 3000;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const rooms = new Map();
 
-function log(...args) {
-  console.log(new Date().toISOString(), ...args);
-}
+const SIM_TICK_RATE = 120;
+const STATE_BROADCAST_RATE = 60;
+const SIM_DT = 1 / SIM_TICK_RATE;
+const BROADCAST_INTERVAL = Math.max(1, Math.round(SIM_TICK_RATE / STATE_BROADCAST_RATE));
+const HISTORY_SIZE = 600;
+
+const GAME_CONFIG = {
+  width: 800,
+  height: 400,
+  paddleWidth: 10,
+  paddleHeight: 60,
+  paddleMargin: 20,
+  ballSize: 10,
+  paddleSpeed: 420, // px per second
+  baseBallSpeedX: 280,
+  baseBallSpeedY: 200,
+  accelerationFactor: 1.04,
+  scoreLimit: 11,
+};
+
+const rooms = new Map();
 
 class WebSocketConnection extends EventEmitter {
   constructor(socket) {
     super();
     this.socket = socket;
     this.buffer = Buffer.alloc(0);
+    this.id = crypto.randomBytes(8).toString('hex');
     this.roomId = null;
     this.playerRole = null;
 
-    this.remoteAddress = socket.remoteAddress;
     socket.on('data', (chunk) => this.handleData(chunk));
     socket.on('close', () => this.emit('close'));
     socket.on('error', (error) => this.emit('error', error));
@@ -30,6 +47,7 @@ class WebSocketConnection extends EventEmitter {
     while (this.buffer.length >= 2) {
       const firstByte = this.buffer[0];
       const secondByte = this.buffer[1];
+
       const opcode = firstByte & 0x0f;
       const isMasked = (secondByte & 0x80) === 0x80;
       let payloadLength = secondByte & 0x7f;
@@ -75,9 +93,7 @@ class WebSocketConnection extends EventEmitter {
         continue;
       }
 
-      if (opcode !== 0x1) {
-        continue;
-      }
+      if (opcode !== 0x1) continue;
 
       this.emit('message', payload.toString('utf8'));
     }
@@ -133,6 +149,10 @@ class WebSocketConnection extends EventEmitter {
   }
 }
 
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
+
 function createRoomId() {
   let roomId;
   do {
@@ -141,8 +161,41 @@ function createRoomId() {
   return roomId;
 }
 
-function sendError(connection, message) {
-  connection.sendJSON({ type: 'error', message });
+function defaultInputPacket() {
+  return { frame: 0, up: false, down: false };
+}
+
+function createInitialState() {
+  const ballX = GAME_CONFIG.width / 2 - GAME_CONFIG.ballSize / 2;
+  const ballY = GAME_CONFIG.height / 2 - GAME_CONFIG.ballSize / 2;
+  const serveDir = Math.random() > 0.5 ? 1 : -1;
+  return {
+    frame: 0,
+    ballX,
+    ballY,
+    ballVX: GAME_CONFIG.baseBallSpeedX * serveDir,
+    ballVY: GAME_CONFIG.baseBallSpeedY * (Math.random() > 0.5 ? 1 : -1),
+    leftY: GAME_CONFIG.height / 2 - GAME_CONFIG.paddleHeight / 2,
+    rightY: GAME_CONFIG.height / 2 - GAME_CONFIG.paddleHeight / 2,
+    leftScore: 0,
+    rightScore: 0,
+    serving: serveDir > 0 ? 'right' : 'left',
+    gameOver: false,
+    winner: null,
+  };
+}
+
+function createRoom() {
+  return {
+    id: createRoomId(),
+    players: { left: null, right: null },
+    inputs: { left: defaultInputPacket(), right: defaultInputPacket() },
+    started: false,
+    state: createInitialState(),
+    lastBroadcastFrame: 0,
+    sequence: 0,
+    history: [],
+  };
 }
 
 function getRoom(connection) {
@@ -150,126 +203,261 @@ function getRoom(connection) {
   return rooms.get(connection.roomId) || null;
 }
 
-function getOpponent(connection) {
+function leaveRoom(connection) {
   const room = getRoom(connection);
-  if (!room) return null;
-  if (room.host === connection) return room.guest;
-  if (room.guest === connection) return room.host;
-  return null;
-}
-
-function cleanupRoom(roomId) {
-  const room = rooms.get(roomId);
   if (!room) return;
-  rooms.delete(roomId);
-}
 
-function leaveRoom(connection, { notifyOpponent = true } = {}) {
-  if (!connection.roomId) return;
-  const { roomId } = connection;
-  const room = rooms.get(roomId);
-
-  if (room) {
-    if (room.host === connection) {
-      room.host = null;
-    } else if (room.guest === connection) {
-      room.guest = null;
-    }
-
-    const opponent = room.host || room.guest;
-    if (!room.host && !room.guest) {
-      cleanupRoom(roomId);
-    } else if (notifyOpponent && opponent) {
-      opponent.sendJSON({ type: 'opponentLeft' });
-      leaveRoom(opponent, { notifyOpponent: false });
-      cleanupRoom(roomId);
-    }
+  if (room.players.left === connection) {
+    room.players.left = null;
+  } else if (room.players.right === connection) {
+    room.players.right = null;
   }
 
   connection.roomId = null;
   connection.playerRole = null;
+
+  const remainingPlayer = room.players.left || room.players.right;
+  if (!remainingPlayer) {
+    rooms.delete(room.id);
+    return;
+  }
+
+  remainingPlayer.sendJSON({ type: 'opponentLeft' });
+  room.started = false;
 }
 
 function handleCreateRoom(connection) {
   leaveRoom(connection);
-  const roomId = createRoomId();
 
-  rooms.set(roomId, { id: roomId, host: connection, guest: null });
-  connection.roomId = roomId;
+  const room = createRoom();
+  rooms.set(room.id, room);
+
+  room.players.left = connection;
+  connection.roomId = room.id;
   connection.playerRole = 'left';
 
-  log(`[room] Created ${roomId} for ${connection.remoteAddress || 'unknown'}`);
-  connection.sendJSON({ type: 'roomCreated', roomId, role: 'left' });
+  connection.sendJSON({ type: 'roomCreated', roomId: room.id, role: 'left' });
 }
 
 function handleJoinRoom(connection, providedRoomId) {
   if (!providedRoomId) {
-    sendError(connection, 'Room id is required.');
+    connection.sendJSON({ type: 'error', message: 'Room id is required.' });
     return;
   }
 
   const roomId = String(providedRoomId).trim().toUpperCase();
   const room = rooms.get(roomId);
 
-  if (!room) {
-    sendError(connection, 'Room not found.');
+  if (!room || !room.players.left) {
+    connection.sendJSON({ type: 'error', message: 'Room not found or unavailable.' });
     return;
   }
 
-  if (!room.host) {
-    cleanupRoom(roomId);
-    sendError(connection, 'Room is not available. Ask the host to create a new one.');
-    return;
-  }
-
-  if (room.guest) {
-    sendError(connection, 'Room is full.');
-    return;
-  }
-
-  if (room.host === connection) {
-    sendError(connection, 'You are already hosting this room.');
+  if (room.players.right) {
+    connection.sendJSON({ type: 'error', message: 'Room is full.' });
     return;
   }
 
   leaveRoom(connection);
-  room.guest = connection;
-  connection.roomId = roomId;
+  room.players.right = connection;
+  connection.roomId = room.id;
   connection.playerRole = 'right';
 
-  log(`[room] ${connection.remoteAddress || 'unknown'} joined room ${roomId}`);
-  connection.sendJSON({ type: 'roomJoined', roomId, role: 'right' });
-  room.host.sendJSON({ type: 'playerJoined', roomId });
+  connection.sendJSON({ type: 'roomJoined', roomId: room.id, role: 'right' });
+  room.players.left.sendJSON({ type: 'playerJoined', roomId: room.id });
 
-  room.host.sendJSON({ type: 'roomReady', roomId });
-  room.guest.sendJSON({ type: 'roomReady', roomId });
+  startMatch(room);
 }
 
-function handlePaddleMove(connection, payload) {
-  const room = getRoom(connection);
-  if (!room) return;
+function startMatch(room) {
+  room.state = createInitialState();
+  room.inputs.left = defaultInputPacket();
+  room.inputs.right = defaultInputPacket();
+  room.started = true;
+  room.sequence = 0;
+  room.history = [];
 
-  const opponent = getOpponent(connection);
-  if (!opponent) return;
+  const payload = {
+    type: 'matchStart',
+    roomId: room.id,
+    state: serializeState(room),
+  };
 
-  const y = typeof payload.y === 'number' ? payload.y : null;
-  if (y === null || Number.isNaN(y)) return;
-
-  opponent.sendJSON({
-    type: 'opponentMove',
-    role: connection.playerRole,
-    y,
+  Object.values(room.players).forEach((player) => {
+    if (player) player.sendJSON(payload);
   });
 }
 
-function handleStateUpdate(connection, payload) {
+function handlePlayerInput(connection, message) {
   const room = getRoom(connection);
-  if (!room) return;
-  if (room.host !== connection) return;
-  if (!room.guest) return;
+  if (!room || !connection.playerRole) return;
 
-  if (typeof payload !== 'object' || payload === null) return;
-  room.guest.sendJSON({ type: 'stateUpdate', state: payload });
+  const packet = room.inputs[connection.playerRole];
+  if (!packet) return;
+
+  const frame = typeof message.frame === 'number' ? message.frame : 0;
+  const up = Boolean(message.up);
+  const down = Boolean(message.down);
+
+  if (frame >= packet.frame) {
+    packet.frame = frame;
+    packet.up = up;
+    packet.down = down;
+  }
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getAxis(input) {
+  if (input.up && !input.down) return -1;
+  if (input.down && !input.up) return 1;
+  return 0;
+}
+
+function reflectBall(state, paddleY) {
+  const paddleCenter = paddleY + GAME_CONFIG.paddleHeight / 2;
+  const ballCenter = state.ballY + GAME_CONFIG.ballSize / 2;
+  const offset = (ballCenter - paddleCenter) / (GAME_CONFIG.paddleHeight / 2);
+  const deflection = offset * 220;
+  state.ballVY = clamp(
+    state.ballVY * GAME_CONFIG.accelerationFactor + deflection,
+    -500,
+    500,
+  );
+  state.ballVX *= GAME_CONFIG.accelerationFactor;
+}
+
+function resetBall(state, scorer) {
+  state.ballX = GAME_CONFIG.width / 2 - GAME_CONFIG.ballSize / 2;
+  state.ballY = GAME_CONFIG.height / 2 - GAME_CONFIG.ballSize / 2;
+  state.ballVX = GAME_CONFIG.baseBallSpeedX * (scorer === 'left' ? 1 : -1);
+  state.ballVY = GAME_CONFIG.baseBallSpeedY * (Math.random() > 0.5 ? 1 : -1);
+  state.serving = scorer;
+}
+
+function simulateRoom(room) {
+  if (!room.started || !room.players.left || !room.players.right) return;
+  const state = room.state;
+
+  state.frame += 1;
+
+  const leftAxis = getAxis(room.inputs.left);
+  const rightAxis = getAxis(room.inputs.right);
+
+  state.leftY += leftAxis * GAME_CONFIG.paddleSpeed * SIM_DT;
+  state.rightY += rightAxis * GAME_CONFIG.paddleSpeed * SIM_DT;
+
+  const paddleLimit = GAME_CONFIG.height - GAME_CONFIG.paddleHeight;
+  state.leftY = clamp(state.leftY, 0, paddleLimit);
+  state.rightY = clamp(state.rightY, 0, paddleLimit);
+
+  let nextBallX = state.ballX + state.ballVX * SIM_DT;
+  let nextBallY = state.ballY + state.ballVY * SIM_DT;
+
+  if (nextBallY <= 0) {
+    nextBallY = 0;
+    state.ballVY = Math.abs(state.ballVY);
+  } else if (nextBallY + GAME_CONFIG.ballSize >= GAME_CONFIG.height) {
+    nextBallY = GAME_CONFIG.height - GAME_CONFIG.ballSize;
+    state.ballVY = -Math.abs(state.ballVY);
+  }
+
+  const rightPaddleX = GAME_CONFIG.width - GAME_CONFIG.paddleMargin - GAME_CONFIG.paddleWidth;
+  if (
+    state.ballVX > 0 &&
+    nextBallX + GAME_CONFIG.ballSize >= rightPaddleX &&
+    nextBallX <= rightPaddleX + GAME_CONFIG.paddleWidth &&
+    nextBallY + GAME_CONFIG.ballSize >= state.rightY &&
+    nextBallY <= state.rightY + GAME_CONFIG.paddleHeight
+  ) {
+    nextBallX = rightPaddleX - GAME_CONFIG.ballSize;
+    state.ballVX = -Math.abs(state.ballVX);
+    reflectBall(state, state.rightY);
+  }
+
+  const leftPaddleX = GAME_CONFIG.paddleMargin;
+  if (
+    state.ballVX < 0 &&
+    nextBallX <= leftPaddleX + GAME_CONFIG.paddleWidth &&
+    nextBallX + GAME_CONFIG.ballSize >= leftPaddleX &&
+    nextBallY + GAME_CONFIG.ballSize >= state.leftY &&
+    nextBallY <= state.leftY + GAME_CONFIG.paddleHeight
+  ) {
+    nextBallX = leftPaddleX + GAME_CONFIG.paddleWidth;
+    state.ballVX = Math.abs(state.ballVX);
+    reflectBall(state, state.leftY);
+  }
+
+  state.ballX = nextBallX;
+  state.ballY = nextBallY;
+
+  if (state.ballX < 0) {
+    state.rightScore += 1;
+    resetBall(state, 'right');
+  } else if (state.ballX + GAME_CONFIG.ballSize > GAME_CONFIG.width) {
+    state.leftScore += 1;
+    resetBall(state, 'left');
+  }
+
+  if (!state.gameOver && (state.leftScore >= GAME_CONFIG.scoreLimit || state.rightScore >= GAME_CONFIG.scoreLimit)) {
+    state.gameOver = true;
+    state.winner = state.leftScore > state.rightScore ? 'Left Player' : 'Right Player';
+  }
+
+  const snapshot = serializeState(room);
+  room.pendingSnapshot = snapshot;
+  room.history.push({
+    frame: state.frame,
+    snapshot,
+  });
+  if (room.history.length > HISTORY_SIZE) {
+    room.history.shift();
+  }
+
+  if (state.frame - room.lastBroadcastFrame >= BROADCAST_INTERVAL) {
+    broadcastState(room);
+    room.lastBroadcastFrame = state.frame;
+  }
+}
+
+function serializeState(room) {
+  const { state } = room;
+  return {
+    frame: state.frame,
+    timestamp: Date.now(),
+    ballX: state.ballX,
+    ballY: state.ballY,
+    ballVX: state.ballVX,
+    ballVY: state.ballVY,
+    leftPaddleY: state.leftY,
+    rightPaddleY: state.rightY,
+    leftScore: state.leftScore,
+    rightScore: state.rightScore,
+    gameOver: state.gameOver,
+    winner: state.winner,
+    leftInputFrame: room.inputs.left.frame,
+    rightInputFrame: room.inputs.right.frame,
+    leftInput: {
+      up: Boolean(room.inputs.left.up),
+      down: Boolean(room.inputs.left.down),
+    },
+    rightInput: {
+      up: Boolean(room.inputs.right.up),
+      down: Boolean(room.inputs.right.down),
+    },
+    sequence: room.sequence += 1,
+  };
+}
+
+function broadcastState(room) {
+  const snapshot = room.pendingSnapshot || serializeState(room);
+  const payload = { type: 'state', state: snapshot };
+  room.pendingSnapshot = null;
+  Object.values(room.players).forEach((player) => {
+    if (player) player.sendJSON(payload);
+  });
 }
 
 function handleMessage(connection, rawMessage) {
@@ -277,32 +465,29 @@ function handleMessage(connection, rawMessage) {
   try {
     message = JSON.parse(rawMessage);
   } catch (error) {
-    sendError(connection, 'Invalid JSON payload.');
+    connection.sendJSON({ type: 'error', message: 'Invalid JSON payload.' });
     return;
   }
 
   switch (message.type) {
     case 'createRoom':
-      log(`[ws] createRoom from ${connection.remoteAddress || 'unknown'}`);
       handleCreateRoom(connection);
       break;
     case 'joinRoom':
-      log(
-        `[ws] joinRoom ${message.roomId || 'N/A'} from ${
-          connection.remoteAddress || 'unknown'
-        }`,
-      );
       handleJoinRoom(connection, message.roomId);
       break;
-    case 'paddleMove':
-      handlePaddleMove(connection, message);
+    case 'input':
+      handlePlayerInput(connection, message);
       break;
-    case 'stateUpdate':
-      log(`[ws] stateUpdate from ${connection.remoteAddress || 'unknown'}`);
-      handleStateUpdate(connection, message.state);
+    case 'ping':
+      connection.sendJSON({
+        type: 'pong',
+        clientTime: message.clientTime || null,
+        serverTime: Date.now(),
+      });
       break;
     default:
-      sendError(connection, `Unknown message type: ${message.type}`);
+      connection.sendJSON({ type: 'error', message: `Unknown message type: ${message.type}` });
   }
 }
 
@@ -328,19 +513,16 @@ function acceptWebSocket(req, socket, head) {
 
   socket.write(`${headers.join('\r\n')}\r\n\r\n`);
   const connection = new WebSocketConnection(socket);
-  log(`[ws] client connected ${connection.remoteAddress || 'unknown'}`);
+
+  log('[ws] client connected', req.socket.remoteAddress);
 
   connection.on('message', (data) => handleMessage(connection, data));
   connection.on('close', () => {
-    log(`[ws] client disconnected ${connection.remoteAddress || 'unknown'}`);
+    log('[ws] client disconnected', connection.id);
     leaveRoom(connection);
   });
   connection.on('error', (error) => {
-    log(
-      `[ws] client error ${connection.remoteAddress || 'unknown'}: ${
-        error?.message || error
-      }`,
-    );
+    log('[ws] client error', connection.id, error?.message || error);
     leaveRoom(connection);
   });
 
@@ -351,16 +533,11 @@ function acceptWebSocket(req, socket, head) {
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Pong multiplayer WebSocket server is running.\n');
+  res.end('Pong multiplayer authoritative server is running.\n');
 });
 
 server.on('upgrade', (req, socket, head) => {
   if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
-    log(
-      `[ws] upgrade request from ${req.socket.remoteAddress || 'unknown'} ${
-        req.headers.origin || ''
-      }`,
-    );
     acceptWebSocket(req, socket, head);
   } else {
     socket.destroy();
@@ -368,5 +545,11 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, () => {
-  log(`WebSocket server listening on ws://localhost:${PORT}`);
+  log(`Authoritative WebSocket server listening on ws://localhost:${PORT}`);
 });
+
+setInterval(() => {
+  rooms.forEach((room) => {
+    simulateRoom(room);
+  });
+}, 1000 / SIM_TICK_RATE);
