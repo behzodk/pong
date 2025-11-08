@@ -866,11 +866,6 @@
           return;
         }
 
-        if (state.freezeFrames && state.freezeFrames > 0) {
-          state.freezeFrames = Math.max(0, state.freezeFrames - 1);
-          return;
-        }
-
         const dt = SIM_DT_S;
         const paddleDelta = paddleSpeedPerSec * dt;
 
@@ -883,7 +878,7 @@
         state.leftY = clamp(state.leftY, 0, paddleLimit);
         state.rightY = clamp(state.rightY, 0, paddleLimit);
         if (state.freezeFrames && state.freezeFrames > 0) {
-          state.freezeFrames -= 1;
+          state.freezeFrames = Math.max(0, state.freezeFrames - 1);
           return;
         }
 
@@ -998,8 +993,7 @@
 
       function resolveSocketUrl() {
         const { protocol, hostname, port } = window.location;
-        const remoteScheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
-        const remoteUrl = `${remoteScheme}${REMOTE_SOCKET_HOST}`;
+        const remoteUrl = `wss://${REMOTE_SOCKET_HOST.replace(/^wss?:\/\//, '')}`;
 
         if (forceLocalServer) {
           const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
@@ -1268,10 +1262,9 @@
 
       function handleLocalInput() {
         if (!playerRole) return;
-        const freezeActive = isFreezeActive();
         const upPressed = Boolean(keys.w || keys.W || keys.ArrowUp);
         const downPressed = Boolean(keys.s || keys.S || keys.ArrowDown);
-        currentInput = freezeActive ? { up: false, down: false } : {
+        currentInput = {
           up: upPressed,
           down: downPressed,
         };

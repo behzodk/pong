@@ -407,8 +407,8 @@ function simulateRoom(room) {
   state.frame += 1;
 
   const freezeActive = state.freezeFrames && state.freezeFrames > 0;
-  const leftAxis = freezeActive || state.gameOver ? 0 : getAxis(room.inputs.left);
-  const rightAxis = freezeActive || state.gameOver ? 0 : getAxis(room.inputs.right);
+  const leftAxis = state.gameOver ? 0 : getAxis(room.inputs.left);
+  const rightAxis = state.gameOver ? 0 : getAxis(room.inputs.right);
 
   state.leftY += leftAxis * GAME_CONFIG.paddleSpeed * SIM_DT;
   state.rightY += rightAxis * GAME_CONFIG.paddleSpeed * SIM_DT;
