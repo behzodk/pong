@@ -18,10 +18,11 @@ const GAME_CONFIG = {
   paddleHeight: 60,
   paddleMargin: 20,
   ballSize: 10,
-  paddleSpeed: 420, // px per second
-  baseBallSpeedX: 280,
-  baseBallSpeedY: 200,
-  accelerationFactor: 1.04,
+  paddleSpeed: 420,
+  baseBallSpeedX: 180,
+  baseBallSpeedY: 140,
+  accelerationFactor: 1.03,
+  serveFreezeTicks: Math.round(SIM_TICK_RATE * 3),
   scoreLimit: 11,
 };
 
@@ -237,6 +238,7 @@ function createInitialState() {
     leftScore: 0,
     rightScore: 0,
     serving: serveDir > 0 ? 'right' : 'left',
+    freezeFrames: GAME_CONFIG.serveFreezeTicks,
     gameOver: false,
     winner: null,
   };
@@ -395,6 +397,7 @@ function resetBall(state, scorer) {
   state.ballVX = GAME_CONFIG.baseBallSpeedX * (scorer === 'left' ? 1 : -1);
   state.ballVY = GAME_CONFIG.baseBallSpeedY * (Math.random() > 0.5 ? 1 : -1);
   state.serving = scorer;
+  state.freezeFrames = GAME_CONFIG.serveFreezeTicks;
 }
 
 function simulateRoom(room) {
@@ -403,8 +406,9 @@ function simulateRoom(room) {
 
   state.frame += 1;
 
-  const leftAxis = getAxis(room.inputs.left);
-  const rightAxis = getAxis(room.inputs.right);
+  const freezeActive = state.freezeFrames && state.freezeFrames > 0;
+  const leftAxis = freezeActive || state.gameOver ? 0 : getAxis(room.inputs.left);
+  const rightAxis = freezeActive || state.gameOver ? 0 : getAxis(room.inputs.right);
 
   state.leftY += leftAxis * GAME_CONFIG.paddleSpeed * SIM_DT;
   state.rightY += rightAxis * GAME_CONFIG.paddleSpeed * SIM_DT;
@@ -413,57 +417,67 @@ function simulateRoom(room) {
   state.leftY = clamp(state.leftY, 0, paddleLimit);
   state.rightY = clamp(state.rightY, 0, paddleLimit);
 
-  let nextBallX = state.ballX + state.ballVX * SIM_DT;
-  let nextBallY = state.ballY + state.ballVY * SIM_DT;
+  if (state.gameOver) {
+    state.ballVX = 0;
+    state.ballVY = 0;
+  } else if (freezeActive) {
+    state.freezeFrames = Math.max(0, state.freezeFrames - 1);
+  } else {
+    let nextBallX = state.ballX + state.ballVX * SIM_DT;
+    let nextBallY = state.ballY + state.ballVY * SIM_DT;
 
-  if (nextBallY <= 0) {
-    nextBallY = 0;
-    state.ballVY = Math.abs(state.ballVY);
-  } else if (nextBallY + GAME_CONFIG.ballSize >= GAME_CONFIG.height) {
-    nextBallY = GAME_CONFIG.height - GAME_CONFIG.ballSize;
-    state.ballVY = -Math.abs(state.ballVY);
-  }
+    if (nextBallY <= 0) {
+      nextBallY = 0;
+      state.ballVY = Math.abs(state.ballVY);
+    } else if (nextBallY + GAME_CONFIG.ballSize >= GAME_CONFIG.height) {
+      nextBallY = GAME_CONFIG.height - GAME_CONFIG.ballSize;
+      state.ballVY = -Math.abs(state.ballVY);
+    }
 
-  const rightPaddleX = GAME_CONFIG.width - GAME_CONFIG.paddleMargin - GAME_CONFIG.paddleWidth;
-  if (
-    state.ballVX > 0 &&
-    nextBallX + GAME_CONFIG.ballSize >= rightPaddleX &&
-    nextBallX <= rightPaddleX + GAME_CONFIG.paddleWidth &&
-    nextBallY + GAME_CONFIG.ballSize >= state.rightY &&
-    nextBallY <= state.rightY + GAME_CONFIG.paddleHeight
-  ) {
-    nextBallX = rightPaddleX - GAME_CONFIG.ballSize;
-    state.ballVX = -Math.abs(state.ballVX);
-    reflectBall(state, state.rightY);
-  }
+    const rightPaddleX = GAME_CONFIG.width - GAME_CONFIG.paddleMargin - GAME_CONFIG.paddleWidth;
+    if (
+      state.ballVX > 0 &&
+      nextBallX + GAME_CONFIG.ballSize >= rightPaddleX &&
+      nextBallX <= rightPaddleX + GAME_CONFIG.paddleWidth &&
+      nextBallY + GAME_CONFIG.ballSize >= state.rightY &&
+      nextBallY <= state.rightY + GAME_CONFIG.paddleHeight
+    ) {
+      nextBallX = rightPaddleX - GAME_CONFIG.ballSize;
+      state.ballVX = -Math.abs(state.ballVX);
+      reflectBall(state, state.rightY);
+    }
 
-  const leftPaddleX = GAME_CONFIG.paddleMargin;
-  if (
-    state.ballVX < 0 &&
-    nextBallX <= leftPaddleX + GAME_CONFIG.paddleWidth &&
-    nextBallX + GAME_CONFIG.ballSize >= leftPaddleX &&
-    nextBallY + GAME_CONFIG.ballSize >= state.leftY &&
-    nextBallY <= state.leftY + GAME_CONFIG.paddleHeight
-  ) {
-    nextBallX = leftPaddleX + GAME_CONFIG.paddleWidth;
-    state.ballVX = Math.abs(state.ballVX);
-    reflectBall(state, state.leftY);
-  }
+    const leftPaddleX = GAME_CONFIG.paddleMargin;
+    if (
+      state.ballVX < 0 &&
+      nextBallX <= leftPaddleX + GAME_CONFIG.paddleWidth &&
+      nextBallX + GAME_CONFIG.ballSize >= leftPaddleX &&
+      nextBallY + GAME_CONFIG.ballSize >= state.leftY &&
+      nextBallY <= state.leftY + GAME_CONFIG.paddleHeight
+    ) {
+      nextBallX = leftPaddleX + GAME_CONFIG.paddleWidth;
+      state.ballVX = Math.abs(state.ballVX);
+      reflectBall(state, state.leftY);
+    }
 
-  state.ballX = nextBallX;
-  state.ballY = nextBallY;
+    state.ballX = nextBallX;
+    state.ballY = nextBallY;
 
-  if (state.ballX < 0) {
-    state.rightScore += 1;
-    resetBall(state, 'right');
-  } else if (state.ballX + GAME_CONFIG.ballSize > GAME_CONFIG.width) {
-    state.leftScore += 1;
-    resetBall(state, 'left');
+    if (state.ballX < 0) {
+      state.rightScore += 1;
+      resetBall(state, 'right');
+    } else if (state.ballX + GAME_CONFIG.ballSize > GAME_CONFIG.width) {
+      state.leftScore += 1;
+      resetBall(state, 'left');
+    }
   }
 
   if (!state.gameOver && (state.leftScore >= GAME_CONFIG.scoreLimit || state.rightScore >= GAME_CONFIG.scoreLimit)) {
     state.gameOver = true;
     state.winner = state.leftScore > state.rightScore ? 'Left Player' : 'Right Player';
+    state.ballVX = 0;
+    state.ballVY = 0;
+    state.freezeFrames = 0;
   }
 
   const snapshot = serializeState(room);
@@ -495,6 +509,8 @@ function serializeState(room) {
     rightPaddleY: state.rightY,
     leftScore: state.leftScore,
     rightScore: state.rightScore,
+    freezeFrames: state.freezeFrames || 0,
+    serving: state.serving,
     gameOver: state.gameOver,
     winner: state.winner,
     leftInputFrame: room.inputs.left.frame,

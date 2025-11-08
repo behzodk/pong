@@ -227,6 +227,26 @@
       min-height: 30px;
       line-height: 1.4;
     }
+    #countdownOverlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 64px;
+      color: #FFF;
+      text-shadow: 0 0 10px rgba(0,0,0,0.6);
+      background: rgba(0,0,0,0.3);
+      pointer-events: none;
+      z-index: 10;
+    }
+    #countdownOverlay.hidden {
+      display: none;
+    }
     #telemetryPanel {
       position: fixed;
       bottom: 20px;
@@ -296,6 +316,7 @@
       <div id="ball"></div>
     </div>
   </div>
+  <div id="countdownOverlay" class="hidden"></div>
 
   <div id="lobbyOverlay">
     <div id="lobbyPanel">
@@ -329,7 +350,7 @@
       }
 
       const REMOTE_SOCKET_HOST = 'pong-tuzn.onrender.com';
-      const DEFAULT_LOCAL_PORT = 10000;
+      const DEFAULT_LOCAL_PORT = 3000;
       const lobbyOverlay = document.getElementById('lobbyOverlay');
       const createRoomBtn = document.getElementById('createRoomBtn');
       const joinRoomBtn = document.getElementById('joinRoomBtn');
@@ -345,16 +366,7 @@
       const ball = document.getElementById('ball');
       const leftScoreEl = document.getElementById('leftScore');
       const rightScoreEl = document.getElementById('rightScore');
-      const telemetryPanel = createTelemetryPanel();
-      const telemetryFields = {
-        rtt: telemetryPanel.querySelector('[data-field="rtt"]'),
-        jitter: telemetryPanel.querySelector('[data-field="jitter"]'),
-        buffer: telemetryPanel.querySelector('[data-field="buffer"]'),
-        send: telemetryPanel.querySelector('[data-field="send"]'),
-        sim: telemetryPanel.querySelector('[data-field="sim"]'),
-        corr: telemetryPanel.querySelector('[data-field="corr"]'),
-      };
-      refreshTelemetry(true);
+      const countdownOverlay = document.getElementById('countdownOverlay');
 
       const urlParams = new URLSearchParams(window.location.search);
       const roomFromUrl = urlParams.get('room');
@@ -383,9 +395,9 @@
       const PADDLE_WIDTH = 10;
       const PADDLE_HEIGHT = 60;
       const PADDLE_MARGIN = 20;
-      const initialSpeedX = 280;
-      const initialSpeedY = 200;
-      const accelerationFactor = 1.04;
+      const initialSpeedX = 180;
+      const initialSpeedY = 140;
+      const accelerationFactor = 1.03;
       const paddleSpeedPerSec = 420;
       const maxScore = 11;
       const paddleLagPadding = 12; // compensate for network delay on remote paddle collisions
@@ -397,6 +409,7 @@
       const SIM_DT_S = SIM_DT_MS / 1000;
       const INPUT_DELAY_FRAMES = 2;
       const MAX_ROLLBACK_FRAMES = 12;
+      const SERVE_FREEZE_FRAMES = SIM_TICK_RATE * 3;
       const SNAPSHOT_BASE_BUFFER_MS = 200;
       const MAX_PREDICTION_MS = 80;
       const OPPONENT_LERP_FACTOR = 0.2;
@@ -448,6 +461,7 @@
       let latestSnapshot = null;
       const simState = createSimState();
       let simFrame = 0;
+      const opponentTargets = { left: null, right: null };
       const stateHistory = new Map();
       const historyOrder = [];
       const localInputBuffer = new Map();
@@ -460,6 +474,17 @@
       };
       let correctionsApplied = 0;
       const MAX_BUFFERED_INPUTS = MAX_ROLLBACK_FRAMES * 6;
+
+      const telemetryPanel = createTelemetryPanel();
+      const telemetryFields = {
+        rtt: telemetryPanel.querySelector('[data-field="rtt"]'),
+        jitter: telemetryPanel.querySelector('[data-field="jitter"]'),
+        buffer: telemetryPanel.querySelector('[data-field="buffer"]'),
+        send: telemetryPanel.querySelector('[data-field="send"]'),
+        sim: telemetryPanel.querySelector('[data-field="sim"]'),
+        corr: telemetryPanel.querySelector('[data-field="corr"]'),
+      };
+      refreshTelemetry(true);
 
       setLobbyControlsDisabled(true);
 
@@ -551,6 +576,8 @@
           rightY: typeof source.rightPaddleY === 'number' ? source.rightPaddleY : basePaddleY,
           leftScore: typeof source.leftScore === 'number' ? source.leftScore : 0,
           rightScore: typeof source.rightScore === 'number' ? source.rightScore : 0,
+          freezeFrames: typeof source.freezeFrames === 'number' ? source.freezeFrames : SERVE_FREEZE_FRAMES,
+          serving: source.serving || 'left',
           gameOver: Boolean(source.gameOver),
           winner: source.winner || null,
         };
@@ -567,6 +594,8 @@
           rightY: state.rightY,
           leftScore: state.leftScore,
           rightScore: state.rightScore,
+          freezeFrames: state.freezeFrames,
+          serving: state.serving,
           gameOver: state.gameOver,
           winner: state.winner,
         };
@@ -589,6 +618,7 @@
         rightScoreEl.textContent = rightScore;
         opponentTargets.left = leftPaddleY;
         opponentTargets.right = rightPaddleY;
+        updateCountdownOverlay();
       }
 
       function storeStateHistory(state) {
@@ -701,6 +731,7 @@
           recordRemoteInput('right', snapshot.rightInputFrame || snapshot.frame || 0, snapshot.rightInput);
         }
         syncViewState();
+        updateCountdownOverlay();
       }
 
       function applySnapshotToSim(snapshot) {
@@ -733,11 +764,16 @@
       function scheduleQueueFlush() {
         if (queueFlushScheduled) return;
         queueFlushScheduled = true;
-        setTimeout(flushMessageQueues, 0);
+        const schedule = typeof queueMicrotask === 'function'
+          ? queueMicrotask
+          : (cb) => Promise.resolve().then(cb).catch(() => {});
+        schedule(() => {
+          queueFlushScheduled = false;
+          flushMessageQueues();
+        });
       }
 
       function flushMessageQueues() {
-        queueFlushScheduled = false;
         if (!socketReady || !socket || socket.readyState !== WebSocket.OPEN) {
           reliableQueue.length = 0;
           unreliableQueue.length = 0;
@@ -824,7 +860,16 @@
       function stepSimulation(state, leftInput, rightInput) {
         if (!state) return;
         state.frame = (state.frame || 0) + 1;
-        if (state.gameOver) return;
+        if (state.gameOver) {
+          state.ballVX = 0;
+          state.ballVY = 0;
+          return;
+        }
+
+        if (state.freezeFrames && state.freezeFrames > 0) {
+          state.freezeFrames = Math.max(0, state.freezeFrames - 1);
+          return;
+        }
 
         const dt = SIM_DT_S;
         const paddleDelta = paddleSpeedPerSec * dt;
@@ -837,6 +882,10 @@
         const paddleLimit = BOARD_HEIGHT - PADDLE_HEIGHT;
         state.leftY = clamp(state.leftY, 0, paddleLimit);
         state.rightY = clamp(state.rightY, 0, paddleLimit);
+        if (state.freezeFrames && state.freezeFrames > 0) {
+          state.freezeFrames -= 1;
+          return;
+        }
 
         let nextBallX = state.ballX + state.ballVX * dt;
         let nextBallY = state.ballY + state.ballVY * dt;
@@ -889,6 +938,9 @@
         if (!state.gameOver && (state.leftScore >= maxScore || state.rightScore >= maxScore)) {
           state.gameOver = true;
           state.winner = state.leftScore > state.rightScore ? 'Left Player' : 'Right Player';
+          state.ballVX = 0;
+          state.ballVY = 0;
+          state.freezeFrames = 0;
         }
       }
 
@@ -906,6 +958,8 @@
         state.ballY = BOARD_HEIGHT / 2 - ballSize / 2;
         state.ballVX = initialSpeedX * (scorer === 'left' ? 1 : -1);
         state.ballVY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
+        state.serving = scorer;
+        state.freezeFrames = SERVE_FREEZE_FRAMES;
       }
 
       function setStatus(message) {
@@ -944,7 +998,8 @@
 
       function resolveSocketUrl() {
         const { protocol, hostname, port } = window.location;
-        const remoteUrl = `wss://${REMOTE_SOCKET_HOST}`;
+        const remoteScheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+        const remoteUrl = `${remoteScheme}${REMOTE_SOCKET_HOST}`;
 
         if (forceLocalServer) {
           const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
@@ -1000,6 +1055,7 @@
           setStatus('Disconnected from server. Refresh the page to reconnect.');
           setLobbyControlsDisabled(true);
           lobbyOverlay.classList.remove('hidden');
+          updateCountdownOverlay();
         });
 
         socket.addEventListener('error', (event) => {
@@ -1007,6 +1063,7 @@
           setStatus('Connection error. Check the console for details and refresh the page.');
           stopPingLoop();
           clearMessageQueues();
+          updateCountdownOverlay();
         });
       }
 
@@ -1118,6 +1175,7 @@
           setStatus('Opponent disconnected. Refresh to start a new match.');
           lobbyOverlay.classList.remove('hidden');
         }
+        updateCountdownOverlay();
       }
 
       function handlePong(message) {
@@ -1210,9 +1268,10 @@
 
       function handleLocalInput() {
         if (!playerRole) return;
+        const freezeActive = isFreezeActive();
         const upPressed = Boolean(keys.w || keys.W || keys.ArrowUp);
         const downPressed = Boolean(keys.s || keys.S || keys.ArrowDown);
-        currentInput = {
+        currentInput = freezeActive ? { up: false, down: false } : {
           up: upPressed,
           down: downPressed,
         };
@@ -1255,6 +1314,10 @@
         return list.reduce((sum, value) => sum + value, 0) / list.length;
       }
 
+      function isFreezeActive() {
+        return matchActive && !gameOver && typeof simState.freezeFrames === 'number' && simState.freezeFrames > 0;
+      }
+
       function updateDynamicSnapshotDelay() {
         const halfRtt = rttEstimate / 2;
         const jitterMargin = jitterEstimate * 2 + 20;
@@ -1267,6 +1330,19 @@
 
       function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
+      }
+
+      function updateCountdownOverlay() {
+        if (!countdownOverlay) return;
+        if (!isFreezeActive()) {
+          countdownOverlay.classList.add('hidden');
+          countdownOverlay.textContent = '';
+          return;
+        }
+        const frames = Math.max(0, simState.freezeFrames || 0);
+        const seconds = Math.max(1, Math.ceil(frames / SIM_TICK_RATE));
+        countdownOverlay.textContent = seconds.toString();
+        countdownOverlay.classList.remove('hidden');
       }
 
       function updatePaddlePositions() {
@@ -1349,6 +1425,7 @@
           stopInputLoop();
           winnerLabel = state.winner || 'Player';
           showWinMessage(`${winnerLabel} wins!`);
+          updateCountdownOverlay();
         }
       }
 
@@ -1390,7 +1467,7 @@
       }
 
       function runGuestSpeculativeCollisions() {
-        if (gameOver) return;
+        if (gameOver || isFreezeActive()) return;
 
         const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
         const rightTop = Math.max(0, renderRightPaddleY - paddleLagPadding);
