@@ -6,6 +6,10 @@ const PORT = process.env.PORT || 3000;
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const rooms = new Map();
 
+function log(...args) {
+  console.log(new Date().toISOString(), ...args);
+}
+
 class WebSocketConnection extends EventEmitter {
   constructor(socket) {
     super();
@@ -14,6 +18,7 @@ class WebSocketConnection extends EventEmitter {
     this.roomId = null;
     this.playerRole = null;
 
+    this.remoteAddress = socket.remoteAddress;
     socket.on('data', (chunk) => this.handleData(chunk));
     socket.on('close', () => this.emit('close'));
     socket.on('error', (error) => this.emit('error', error));
@@ -193,6 +198,7 @@ function handleCreateRoom(connection) {
   connection.roomId = roomId;
   connection.playerRole = 'left';
 
+  log(`[room] Created ${roomId} for ${connection.remoteAddress || 'unknown'}`);
   connection.sendJSON({ type: 'roomCreated', roomId, role: 'left' });
 }
 
@@ -231,6 +237,7 @@ function handleJoinRoom(connection, providedRoomId) {
   connection.roomId = roomId;
   connection.playerRole = 'right';
 
+  log(`[room] ${connection.remoteAddress || 'unknown'} joined room ${roomId}`);
   connection.sendJSON({ type: 'roomJoined', roomId, role: 'right' });
   room.host.sendJSON({ type: 'playerJoined', roomId });
 
@@ -276,15 +283,22 @@ function handleMessage(connection, rawMessage) {
 
   switch (message.type) {
     case 'createRoom':
+      log(`[ws] createRoom from ${connection.remoteAddress || 'unknown'}`);
       handleCreateRoom(connection);
       break;
     case 'joinRoom':
+      log(
+        `[ws] joinRoom ${message.roomId || 'N/A'} from ${
+          connection.remoteAddress || 'unknown'
+        }`,
+      );
       handleJoinRoom(connection, message.roomId);
       break;
     case 'paddleMove':
       handlePaddleMove(connection, message);
       break;
     case 'stateUpdate':
+      log(`[ws] stateUpdate from ${connection.remoteAddress || 'unknown'}`);
       handleStateUpdate(connection, message.state);
       break;
     default:
@@ -314,10 +328,21 @@ function acceptWebSocket(req, socket, head) {
 
   socket.write(`${headers.join('\r\n')}\r\n\r\n`);
   const connection = new WebSocketConnection(socket);
+  log(`[ws] client connected ${connection.remoteAddress || 'unknown'}`);
 
   connection.on('message', (data) => handleMessage(connection, data));
-  connection.on('close', () => leaveRoom(connection));
-  connection.on('error', () => leaveRoom(connection));
+  connection.on('close', () => {
+    log(`[ws] client disconnected ${connection.remoteAddress || 'unknown'}`);
+    leaveRoom(connection);
+  });
+  connection.on('error', (error) => {
+    log(
+      `[ws] client error ${connection.remoteAddress || 'unknown'}: ${
+        error?.message || error
+      }`,
+    );
+    leaveRoom(connection);
+  });
 
   if (head && head.length) {
     connection.handleData(head);
@@ -331,6 +356,11 @@ const server = http.createServer((req, res) => {
 
 server.on('upgrade', (req, socket, head) => {
   if (req.headers.upgrade && req.headers.upgrade.toLowerCase() === 'websocket') {
+    log(
+      `[ws] upgrade request from ${req.socket.remoteAddress || 'unknown'} ${
+        req.headers.origin || ''
+      }`,
+    );
     acceptWebSocket(req, socket, head);
   } else {
     socket.destroy();
@@ -338,5 +368,5 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`WebSocket server listening on ws://localhost:${PORT}`);
+  log(`WebSocket server listening on ws://localhost:${PORT}`);
 });

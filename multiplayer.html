@@ -300,7 +300,8 @@
         return;
       }
 
-      const WS_PORT = 3000;
+      const REMOTE_SOCKET_HOST = 'pong-tuzn.onrender.com';
+      const DEFAULT_LOCAL_PORT = 3000;
       const lobbyOverlay = document.getElementById('lobbyOverlay');
       const createRoomBtn = document.getElementById('createRoomBtn');
       const joinRoomBtn = document.getElementById('joinRoomBtn');
@@ -319,6 +320,9 @@
 
       const urlParams = new URLSearchParams(window.location.search);
       const roomFromUrl = urlParams.get('room');
+      const serverParam = (urlParams.get('server') || '').toLowerCase();
+      const forceRemoteServer = serverParam === 'remote';
+      const forceLocalServer = serverParam === 'local';
       if (roomFromUrl) {
         roomIdInput.value = roomFromUrl.toUpperCase();
       }
@@ -445,14 +449,60 @@
         }
       }
 
+      function debugLog(...args) {
+        console.log('[multiplayer]', ...args);
+      }
+
+      function resolveSocketUrl() {
+        const { protocol, hostname, port, host } = window.location;
+        const isLocalHost =
+          !hostname ||
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '0.0.0.0';
+        const remoteUrl = `wss://${REMOTE_SOCKET_HOST}`;
+
+        if (forceRemoteServer) {
+          debugLog('Server override: remote');
+          return remoteUrl;
+        }
+
+        if (forceLocalServer) {
+          const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
+          const targetHost = hostname || 'localhost';
+          const targetPort = port || DEFAULT_LOCAL_PORT;
+          debugLog('Server override: local');
+          return `${scheme}${targetHost}:${targetPort}`;
+        }
+
+        if (protocol === 'file:' || protocol === 'about:') {
+          return remoteUrl;
+        }
+
+        if (hostname === REMOTE_SOCKET_HOST) {
+          const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
+          return `${scheme}${host || REMOTE_SOCKET_HOST}`;
+        }
+
+        if (isLocalHost) {
+          const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
+          const targetHost = hostname || 'localhost';
+          const targetPort = port || DEFAULT_LOCAL_PORT;
+          return `${scheme}${targetHost}:${targetPort}`;
+        }
+
+        return remoteUrl;
+      }
+
       function connectSocket() {
-        const shouldUseSecure = window.location.protocol === 'https:';
-        const scheme = shouldUseSecure ? 'wss://' : 'ws://';
-        const targetHost = window.location.hostname || 'localhost';
-        socket = new WebSocket(`${scheme}${targetHost}:${WS_PORT}`);
+        const socketUrl = resolveSocketUrl();
+        debugLog('Connecting to', socketUrl);
+        setStatus(`Connecting to multiplayer server (${socketUrl})...`);
+        socket = new WebSocket(socketUrl);
 
         socket.addEventListener('open', () => {
           socketReady = true;
+          debugLog('WebSocket open', socket.readyState);
           setStatus('Connected. Create a room or join an existing one.');
           setLobbyControlsDisabled(false);
           if (roomFromUrl) {
@@ -463,6 +513,7 @@
         });
 
         socket.addEventListener('message', (event) => {
+          debugLog('WebSocket message', event.data);
           let payload;
           try {
             payload = JSON.parse(event.data);
@@ -473,15 +524,17 @@
           handleServerMessage(payload);
         });
 
-        socket.addEventListener('close', () => {
+        socket.addEventListener('close', (event) => {
           socketReady = false;
+          debugLog('WebSocket close', event.code, event.reason);
           setStatus('Disconnected from server. Refresh the page to reconnect.');
           setLobbyControlsDisabled(true);
           lobbyOverlay.classList.remove('hidden');
         });
 
-        socket.addEventListener('error', () => {
-          setStatus('Connection error. Please refresh the page.');
+        socket.addEventListener('error', (event) => {
+          debugLog('WebSocket error', event);
+          setStatus('Connection error. Check the console for details and refresh the page.');
         });
       }
 
