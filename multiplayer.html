@@ -227,6 +227,34 @@
       min-height: 30px;
       line-height: 1.4;
     }
+    #telemetryPanel {
+      position: fixed;
+      bottom: 20px;
+      left: 20px;
+      width: 210px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 9px;
+      color: #fff;
+      z-index: 5;
+      pointer-events: none;
+      line-height: 1.4;
+    }
+    #telemetryPanel .row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    #telemetryPanel .row:last-child {
+      margin-bottom: 0;
+    }
+    #telemetryPanel .label {
+      color: rgba(255,255,255,0.6);
+      margin-right: 8px;
+    }
     #notLaptopMsg {
       color: #fff;
       font-size: 24px;
@@ -317,6 +345,16 @@
       const ball = document.getElementById('ball');
       const leftScoreEl = document.getElementById('leftScore');
       const rightScoreEl = document.getElementById('rightScore');
+      const telemetryPanel = createTelemetryPanel();
+      const telemetryFields = {
+        rtt: telemetryPanel.querySelector('[data-field="rtt"]'),
+        jitter: telemetryPanel.querySelector('[data-field="jitter"]'),
+        buffer: telemetryPanel.querySelector('[data-field="buffer"]'),
+        send: telemetryPanel.querySelector('[data-field="send"]'),
+        sim: telemetryPanel.querySelector('[data-field="sim"]'),
+        corr: telemetryPanel.querySelector('[data-field="corr"]'),
+      };
+      refreshTelemetry(true);
 
       const urlParams = new URLSearchParams(window.location.search);
       const roomFromUrl = urlParams.get('room');
@@ -361,7 +399,6 @@
       const MAX_ROLLBACK_FRAMES = 12;
       const SNAPSHOT_BASE_BUFFER_MS = 200;
       const MAX_PREDICTION_MS = 80;
-      const FRAME_TIME_MS = 1000 / 60;
       const OPPONENT_LERP_FACTOR = 0.2;
       const MAX_SNAPSHOTS = 20;
       const PING_INTERVAL_MS = 1000;
@@ -397,6 +434,15 @@
       let rttEstimate = 120;
       let jitterEstimate = 10;
       let lastRttValue = null;
+      const reliableQueue = [];
+      const unreliableQueue = [];
+      let queueFlushScheduled = false;
+      const MAX_UNRELIABLE_BATCH = 4;
+      const MAX_RELIABLE_BATCH = 6;
+      let inputsSentSinceSample = 0;
+      let inputSendRate = 0;
+      let lastSendRateSample = performance.now();
+      let lastTelemetryUpdate = 0;
 
       const stateSnapshots = [];
       let latestSnapshot = null;
@@ -425,7 +471,7 @@
         if (!socketReady) return;
         shareLinkContainer.classList.add('hidden');
         setStatus('Creating room...');
-        socket.send(JSON.stringify({ type: 'createRoom' }));
+        enqueueReliable({ type: 'createRoom' });
         setLobbyControlsDisabled(true);
       });
 
@@ -436,7 +482,7 @@
           setStatus('Enter a room ID before joining.');
           return;
         }
-        socket.send(JSON.stringify({ type: 'joinRoom', roomId: requestedRoom }));
+        enqueueReliable({ type: 'joinRoom', roomId: requestedRoom });
         setStatus(`Joining room ${requestedRoom}...`);
         setLobbyControlsDisabled(true);
       });
@@ -473,6 +519,21 @@
           copyLinkBtn.textContent = previous;
           copyLinkBtn.disabled = false;
         }, 1200);
+      }
+
+      function createTelemetryPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'telemetryPanel';
+        panel.innerHTML = `
+          <div class="row"><span class="label">RTT</span><span data-field="rtt">--</span></div>
+          <div class="row"><span class="label">Jitter</span><span data-field="jitter">--</span></div>
+          <div class="row"><span class="label">Buffer</span><span data-field="buffer">--</span></div>
+          <div class="row"><span class="label">Send</span><span data-field="send">--</span></div>
+          <div class="row"><span class="label">Sim</span><span data-field="sim">--</span></div>
+          <div class="row"><span class="label">Fixes</span><span data-field="corr">0</span></div>
+        `;
+        document.body.appendChild(panel);
+        return panel;
       }
 
       function createSimState(snapshot = null) {
@@ -646,6 +707,86 @@
         Object.assign(simState, createSimState(snapshot));
       }
 
+      function enqueueReliable(payload) {
+        return enqueueMessage(payload, { reliable: true });
+      }
+
+      function enqueueUnreliable(payload, options = {}) {
+        return enqueueMessage(payload, { reliable: false, ...options });
+      }
+
+      function enqueueMessage(payload, { reliable = true, trackInput = false } = {}) {
+        if (!socketReady || !socket || socket.readyState !== WebSocket.OPEN) return false;
+        const serialized = JSON.stringify(payload);
+        if (reliable) {
+          reliableQueue.push(serialized);
+        } else {
+          unreliableQueue.push(serialized);
+        }
+        if (trackInput) {
+          inputsSentSinceSample += 1;
+        }
+        scheduleQueueFlush();
+        return true;
+      }
+
+      function scheduleQueueFlush() {
+        if (queueFlushScheduled) return;
+        queueFlushScheduled = true;
+        setTimeout(flushMessageQueues, 0);
+      }
+
+      function flushMessageQueues() {
+        queueFlushScheduled = false;
+        if (!socketReady || !socket || socket.readyState !== WebSocket.OPEN) {
+          reliableQueue.length = 0;
+          unreliableQueue.length = 0;
+          return;
+        }
+        let sent = 0;
+        while (unreliableQueue.length && sent < MAX_UNRELIABLE_BATCH) {
+          socket.send(unreliableQueue.shift());
+          sent += 1;
+        }
+        let reliableSent = 0;
+        while (reliableQueue.length && reliableSent < MAX_RELIABLE_BATCH) {
+          socket.send(reliableQueue.shift());
+          reliableSent += 1;
+        }
+        if (reliableQueue.length || unreliableQueue.length) {
+          scheduleQueueFlush();
+        }
+      }
+
+      function clearMessageQueues() {
+        reliableQueue.length = 0;
+        unreliableQueue.length = 0;
+        queueFlushScheduled = false;
+      }
+
+      function refreshTelemetry(force = false) {
+        if (!telemetryFields) return;
+        const now = performance.now();
+        if (!force && now - lastTelemetryUpdate < 250) return;
+        lastTelemetryUpdate = now;
+        updateSendRate(now);
+        telemetryFields.rtt.textContent = `${Math.round(rttEstimate) || 0} ms`;
+        telemetryFields.jitter.textContent = `${Math.round(jitterEstimate) || 0} ms`;
+        telemetryFields.buffer.textContent = `${Math.round(dynamicSnapshotDelay) || 0} ms`;
+        telemetryFields.send.textContent = `${inputSendRate.toFixed(1)} msg/s`;
+        telemetryFields.sim.textContent = `${simFrame}`;
+        telemetryFields.corr.textContent = `${correctionsApplied}`;
+      }
+
+      function updateSendRate(now) {
+        if (now - lastSendRateSample >= 1000) {
+          const elapsed = now - lastSendRateSample || 1;
+          inputSendRate = inputsSentSinceSample * (1000 / elapsed);
+          inputsSentSinceSample = 0;
+          lastSendRateSample = now;
+        }
+      }
+
       function runLocalSimulation() {
         if (!matchActive || gameOver) return;
         const now = performance.now();
@@ -676,6 +817,7 @@
           syncViewState();
           runGuestSpeculativeCollisions();
           updateBallPosition();
+          refreshTelemetry();
         }
       }
 
@@ -806,7 +948,7 @@
 
         if (forceLocalServer) {
           const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
-          const targetHost = hostname || 'w';
+          const targetHost = hostname || 'localhost';
           const targetPort = port || DEFAULT_LOCAL_PORT;
           debugLog('Server override: local');
           return `${scheme}${targetHost}:${targetPort}`;
@@ -829,7 +971,7 @@
           setLobbyControlsDisabled(false);
           startPingLoop();
           if (roomFromUrl) {
-            socket.send(JSON.stringify({ type: 'joinRoom', roomId: roomFromUrl.toUpperCase() }));
+            enqueueReliable({ type: 'joinRoom', roomId: roomFromUrl.toUpperCase() });
             setStatus(`Attempting to join room ${roomFromUrl.toUpperCase()}...`);
             setLobbyControlsDisabled(true);
           }
@@ -853,6 +995,7 @@
           gameStarted = false;
           stopInputLoop();
           stopPingLoop();
+          clearMessageQueues();
           debugLog('WebSocket close', event.code, event.reason);
           setStatus('Disconnected from server. Refresh the page to reconnect.');
           setLobbyControlsDisabled(true);
@@ -863,6 +1006,7 @@
           debugLog('WebSocket error', event);
           setStatus('Connection error. Check the console for details and refresh the page.');
           stopPingLoop();
+          clearMessageQueues();
         });
       }
 
@@ -887,7 +1031,7 @@
         const id = ++pingCounter;
         pendingPings.set(id, performance.now());
         lastPingSentAt = Date.now();
-        socket.send(JSON.stringify({ type: 'ping', id, clientTime: lastPingSentAt }));
+        enqueueReliable({ type: 'ping', id, clientTime: lastPingSentAt });
       }
 
       function startInputLoop() {
@@ -896,14 +1040,17 @@
         if (!socketReady || !roomId || !playerRole || !matchActive) return;
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         const targetFrame = simFrame + INPUT_DELAY_FRAMES;
-        socket.send(JSON.stringify({
-          type: 'input',
-          roomId,
-          frame: targetFrame,
-          role: playerRole,
-          up: Boolean(currentInput.up),
-          down: Boolean(currentInput.down),
-        }));
+        enqueueUnreliable(
+          {
+            type: 'input',
+            roomId,
+            frame: targetFrame,
+            role: playerRole,
+            up: Boolean(currentInput.up),
+            down: Boolean(currentInput.down),
+          },
+          { trackInput: true },
+        );
       }, PADDLE_TICK_MS);
       }
 
@@ -990,6 +1137,7 @@
         rttEstimate = averageSamples(rttSamples) || rttEstimate;
         jitterEstimate = averageSamples(jitterSamples) || jitterEstimate;
         updateDynamicSnapshotDelay();
+        refreshTelemetry(true);
       }
 
       function beginMatch(snapshot) {
@@ -1006,6 +1154,7 @@
         }
         gameStarted = true;
         startInputLoop();
+        refreshTelemetry(true);
       }
 
       function initializeGame() {
@@ -1055,7 +1204,6 @@
         updatePaddlePositions();
 
         if (!gameOver) {
-          predictRemoteState();
           requestAnimationFrame(update);
         }
       }
@@ -1130,21 +1278,6 @@
         ball.style.left = `${renderBallX}px`;
         ball.style.top = `${renderBallY}px`;
       }
-
-      function hermiteInterpolate(p0, p1, v0, v1, t, durationSeconds) {
-        const clampedT = Math.min(1, Math.max(0, t));
-        const t2 = clampedT * clampedT;
-        const t3 = t2 * clampedT;
-        const m0 = v0 * durationSeconds;
-        const m1 = v1 * durationSeconds;
-        return (
-          (2 * t3 - 3 * t2 + 1) * p0 +
-          (t3 - 2 * t2 + clampedT) * m0 +
-          (-2 * t3 + 3 * t2) * p1 +
-          (t3 - t2) * m1
-        );
-      }
-
 
       function reflectBall(paddleY, paddleEl) {
         const paddleCenter = paddleY + paddleEl.offsetHeight / 2;
@@ -1253,10 +1386,7 @@
         syncViewState();
         runGuestSpeculativeCollisions();
         updateBallPosition();
-      }
-
-      function predictRemoteState() {
-        // Local rollback simulation drives the render state.
+        refreshTelemetry(true);
       }
 
       function runGuestSpeculativeCollisions() {

@@ -35,6 +35,12 @@ class WebSocketConnection extends EventEmitter {
     this.id = crypto.randomBytes(8).toString('hex');
     this.roomId = null;
     this.playerRole = null;
+    this.reliableQueue = [];
+    this.unreliableQueue = [];
+    this.flushScheduled = false;
+    this.destroyed = false;
+    this.MAX_RELIABLE_BATCH = 8;
+    this.MAX_UNRELIABLE_BATCH = 4;
 
     socket.on('data', (chunk) => this.handleData(chunk));
     socket.on('close', () => this.emit('close'));
@@ -132,12 +138,61 @@ class WebSocketConnection extends EventEmitter {
     this.socket.write(frame);
   }
 
-  sendJSON(payload) {
+  sendJSON(payload, options = {}) {
+    this.enqueuePayload(payload, options);
+  }
+
+  enqueuePayload(payload, { reliable = true } = {}) {
+    if (this.destroyed) return;
+    let serialized;
     try {
-      this.sendFrame(JSON.stringify(payload));
+      serialized = JSON.stringify(payload);
     } catch (error) {
-      console.error('Failed to send payload', error);
+      console.error('Failed to serialize payload', error);
+      return;
     }
+    if (reliable) {
+      this.reliableQueue.push(serialized);
+    } else {
+      this.unreliableQueue.push(serialized);
+    }
+    this.scheduleFlush();
+  }
+
+  scheduleFlush() {
+    if (this.flushScheduled || this.destroyed) return;
+    this.flushScheduled = true;
+    setImmediate(() => this.flushQueues());
+  }
+
+  flushQueues() {
+    if (this.destroyed) {
+      this.reliableQueue.length = 0;
+      this.unreliableQueue.length = 0;
+      return;
+    }
+    this.flushScheduled = false;
+    let sentReliable = 0;
+    let sentUnreliable = 0;
+    while (this.unreliableQueue.length && sentUnreliable < this.MAX_UNRELIABLE_BATCH) {
+      const payload = this.unreliableQueue.shift();
+      this.sendFrame(payload);
+      sentUnreliable += 1;
+    }
+    while (this.reliableQueue.length && sentReliable < this.MAX_RELIABLE_BATCH) {
+      const payload = this.reliableQueue.shift();
+      this.sendFrame(payload);
+      sentReliable += 1;
+    }
+    if (this.reliableQueue.length || this.unreliableQueue.length) {
+      this.scheduleFlush();
+    }
+  }
+
+  clearQueues() {
+    this.reliableQueue.length = 0;
+    this.unreliableQueue.length = 0;
+    this.flushScheduled = false;
   }
 
   close() {
@@ -146,6 +201,8 @@ class WebSocketConnection extends EventEmitter {
     } catch (error) {
       console.error('Failed to close connection', error);
     }
+    this.destroyed = true;
+    this.clearQueues();
   }
 }
 
@@ -225,7 +282,7 @@ function leaveRoom(connection) {
     return;
   }
 
-  remainingPlayer.sendJSON({ type: 'opponentLeft' });
+  remainingPlayer.sendJSON({ channel: 'control', type: 'opponentLeft' }, { reliable: true });
   room.started = false;
 }
 
@@ -238,12 +295,12 @@ function handleCreateRoom(connection) {
   connection.roomId = room.id;
   connection.playerRole = 'left';
 
-  connection.sendJSON({ type: 'roomCreated', roomId: room.id, role: 'left' });
+  connection.sendJSON({ channel: 'control', type: 'roomCreated', roomId: room.id, role: 'left' }, { reliable: true });
 }
 
 function handleJoinRoom(connection, providedRoomId) {
   if (!providedRoomId) {
-    connection.sendJSON({ type: 'error', message: 'Room id is required.' });
+    connection.sendJSON({ channel: 'control', type: 'error', message: 'Room id is required.' }, { reliable: true });
     return;
   }
 
@@ -251,12 +308,12 @@ function handleJoinRoom(connection, providedRoomId) {
   const room = rooms.get(roomId);
 
   if (!room || !room.players.left) {
-    connection.sendJSON({ type: 'error', message: 'Room not found or unavailable.' });
+    connection.sendJSON({ channel: 'control', type: 'error', message: 'Room not found or unavailable.' }, { reliable: true });
     return;
   }
 
   if (room.players.right) {
-    connection.sendJSON({ type: 'error', message: 'Room is full.' });
+    connection.sendJSON({ channel: 'control', type: 'error', message: 'Room is full.' }, { reliable: true });
     return;
   }
 
@@ -265,8 +322,8 @@ function handleJoinRoom(connection, providedRoomId) {
   connection.roomId = room.id;
   connection.playerRole = 'right';
 
-  connection.sendJSON({ type: 'roomJoined', roomId: room.id, role: 'right' });
-  room.players.left.sendJSON({ type: 'playerJoined', roomId: room.id });
+  connection.sendJSON({ channel: 'control', type: 'roomJoined', roomId: room.id, role: 'right' }, { reliable: true });
+  room.players.left.sendJSON({ channel: 'control', type: 'playerJoined', roomId: room.id }, { reliable: true });
 
   startMatch(room);
 }
@@ -280,13 +337,14 @@ function startMatch(room) {
   room.history = [];
 
   const payload = {
+    channel: 'control',
     type: 'matchStart',
     roomId: room.id,
     state: serializeState(room),
   };
 
   Object.values(room.players).forEach((player) => {
-    if (player) player.sendJSON(payload);
+    if (player) player.sendJSON(payload, { reliable: true });
   });
 }
 
@@ -455,10 +513,10 @@ function serializeState(room) {
 
 function broadcastState(room) {
   const snapshot = room.pendingSnapshot || serializeState(room);
-  const payload = { type: 'state', state: snapshot };
+  const payload = { channel: 'state', type: 'state', state: snapshot };
   room.pendingSnapshot = null;
   Object.values(room.players).forEach((player) => {
-    if (player) player.sendJSON(payload);
+    if (player) player.sendJSON(payload, { reliable: false });
   });
 }
 
@@ -467,7 +525,7 @@ function handleMessage(connection, rawMessage) {
   try {
     message = JSON.parse(rawMessage);
   } catch (error) {
-    connection.sendJSON({ type: 'error', message: 'Invalid JSON payload.' });
+    connection.sendJSON({ channel: 'control', type: 'error', message: 'Invalid JSON payload.' }, { reliable: true });
     return;
   }
 
@@ -483,14 +541,15 @@ function handleMessage(connection, rawMessage) {
       break;
     case 'ping':
       connection.sendJSON({
+        channel: 'control',
         type: 'pong',
         id: message.id || null,
         clientTime: message.clientTime || null,
         serverTime: Date.now(),
-      });
+      }, { reliable: true });
       break;
     default:
-      connection.sendJSON({ type: 'error', message: `Unknown message type: ${message.type}` });
+      connection.sendJSON({ channel: 'control', type: 'error', message: `Unknown message type: ${message.type}` }, { reliable: true });
   }
 }
 
@@ -522,10 +581,14 @@ function acceptWebSocket(req, socket, head) {
   connection.on('message', (data) => handleMessage(connection, data));
   connection.on('close', () => {
     log('[ws] client disconnected', connection.id);
+    connection.destroyed = true;
+    connection.clearQueues();
     leaveRoom(connection);
   });
   connection.on('error', (error) => {
     log('[ws] client error', connection.id, error?.message || error);
+    connection.destroyed = true;
+    connection.clearQueues();
     leaveRoom(connection);
   });
 
