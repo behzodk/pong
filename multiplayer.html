@@ -301,7 +301,7 @@
       }
 
       const REMOTE_SOCKET_HOST = 'pong-tuzn.onrender.com';
-      const DEFAULT_LOCAL_PORT = 3000;
+      const DEFAULT_LOCAL_PORT = 10000;
       const lobbyOverlay = document.getElementById('lobbyOverlay');
       const createRoomBtn = document.getElementById('createRoomBtn');
       const joinRoomBtn = document.getElementById('joinRoomBtn');
@@ -321,7 +321,6 @@
       const urlParams = new URLSearchParams(window.location.search);
       const roomFromUrl = urlParams.get('room');
       const serverParam = (urlParams.get('server') || '').toLowerCase();
-      const forceRemoteServer = serverParam === 'remote';
       const forceLocalServer = serverParam === 'local';
       if (roomFromUrl) {
         roomIdInput.value = roomFromUrl.toUpperCase();
@@ -345,6 +344,7 @@
       const accelerationFactor = 1.06;
       const paddleSpeed = 7;
       const maxScore = 11;
+      const paddleLagPadding = 12; // compensate for network delay on remote paddle collisions
 
       let leftScore = 0;
       let rightScore = 0;
@@ -454,18 +454,8 @@
       }
 
       function resolveSocketUrl() {
-        const { protocol, hostname, port, host } = window.location;
-        const isLocalHost =
-          !hostname ||
-          hostname === 'localhost' ||
-          hostname === '127.0.0.1' ||
-          hostname === '0.0.0.0';
+        const { protocol, hostname, port } = window.location;
         const remoteUrl = `wss://${REMOTE_SOCKET_HOST}`;
-
-        if (forceRemoteServer) {
-          debugLog('Server override: remote');
-          return remoteUrl;
-        }
 
         if (forceLocalServer) {
           const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
@@ -475,22 +465,7 @@
           return `${scheme}${targetHost}:${targetPort}`;
         }
 
-        if (protocol === 'file:' || protocol === 'about:') {
-          return remoteUrl;
-        }
-
-        if (hostname === REMOTE_SOCKET_HOST) {
-          const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
-          return `${scheme}${host || REMOTE_SOCKET_HOST}`;
-        }
-
-        if (isLocalHost) {
-          const scheme = protocol === 'https:' ? 'wss://' : 'ws://';
-          const targetHost = hostname || 'localhost';
-          const targetPort = port || DEFAULT_LOCAL_PORT;
-          return `${scheme}${targetHost}:${targetPort}`;
-        }
-
+        debugLog('Using remote server');
         return remoteUrl;
       }
 
@@ -728,11 +703,17 @@
           }
 
           const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
+          const rightTop = Math.max(0, rightPaddleY - paddleLagPadding);
+          const rightBottom = Math.min(
+            gameBoard.clientHeight,
+            rightPaddleY + rightPaddle.offsetHeight + paddleLagPadding,
+          );
           if (
+            ballVelocityX > 0 &&
             ballX + ballSize >= rightPaddleX &&
-            ballX + ballSize - stepX < rightPaddleX &&
-            ballY + ballSize >= rightPaddleY &&
-            ballY <= rightPaddleY + rightPaddle.offsetHeight
+            ballX <= rightPaddleX + rightPaddle.offsetWidth &&
+            ballY + ballSize >= rightTop &&
+            ballY <= rightBottom
           ) {
             reflectBall(rightPaddleY, rightPaddle);
             ballVelocityX = -Math.abs(ballVelocityX) * accelerationFactor;
@@ -740,11 +721,17 @@
           }
 
           const leftCollisionX = 20 + leftPaddle.offsetWidth;
+          const leftTop = Math.max(0, leftPaddleY - paddleLagPadding);
+          const leftBottom = Math.min(
+            gameBoard.clientHeight,
+            leftPaddleY + leftPaddle.offsetHeight + paddleLagPadding,
+          );
           if (
+            ballVelocityX < 0 &&
             ballX <= leftCollisionX &&
-            ballX - stepX > 20 &&
-            ballY + ballSize >= leftPaddleY &&
-            ballY <= leftPaddleY + leftPaddle.offsetHeight
+            ballX + ballSize >= 20 &&
+            ballY + ballSize >= leftTop &&
+            ballY <= leftBottom
           ) {
             reflectBall(leftPaddleY, leftPaddle);
             ballVelocityX = Math.abs(ballVelocityX) * accelerationFactor;
@@ -852,11 +839,11 @@
           rightScore = state.rightScore;
           rightScoreEl.textContent = rightScore;
         }
-        if (typeof state.leftPaddleY === 'number') {
+        if (typeof state.leftPaddleY === 'number' && playerRole !== 'left') {
           leftPaddleY = clampY(state.leftPaddleY);
           leftPaddle.style.top = `${leftPaddleY}px`;
         }
-        if (typeof state.rightPaddleY === 'number') {
+        if (typeof state.rightPaddleY === 'number' && playerRole !== 'right') {
           rightPaddleY = clampY(state.rightPaddleY);
           rightPaddle.style.top = `${rightPaddleY}px`;
         }
