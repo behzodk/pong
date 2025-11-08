@@ -10,6 +10,7 @@
       background: radial-gradient(circle at center, #F6B17A, #000 70%);
       position: relative;
       overflow: hidden;
+      color: #ffffff;
     }
     body::before {
       content: "";
@@ -115,7 +116,7 @@
       transform: translateX(-50%);
       display: flex;
       justify-content: space-between;
-      width: 180px;
+      width: 200px;
       font-family: 'Press Start 2P', monospace;
       color: #ffffff;
       text-shadow: 0 0 8px rgba(255,255,255,0.5);
@@ -123,6 +124,108 @@
     }
     #scoreBoard > div {
       font-size: 16px;
+    }
+    #lobbyOverlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.82);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 4;
+      text-align: center;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    #lobbyOverlay.hidden {
+      display: none;
+    }
+    #lobbyPanel {
+      background: rgba(5, 5, 20, 0.9);
+      border: 2px solid rgba(255,255,255,0.2);
+      border-radius: 12px;
+      padding: 30px;
+      width: 420px;
+      font-family: 'Press Start 2P', monospace;
+      color: #fff;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+    }
+    #lobbyPanel h2 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+    .lobby-hint {
+      font-size: 10px;
+      color: rgba(255,255,255,0.8);
+      margin-bottom: 20px;
+      line-height: 1.6;
+    }
+    .lobby-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+    .lobby-actions button,
+    #copyLinkBtn {
+      background: linear-gradient(90deg, #FF1944, #FFB347);
+      color: #000;
+      border: none;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 10px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.2s ease;
+    }
+    .lobby-actions button:disabled,
+    #copyLinkBtn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    #roomIdInput {
+      flex: 1 1 120px;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      color: #fff;
+      padding: 10px;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    #shareLinkContainer {
+      border-top: 1px solid rgba(255,255,255,0.2);
+      margin-top: 15px;
+      padding-top: 15px;
+      font-size: 10px;
+    }
+    #shareLinkContainer.hidden {
+      display: none;
+    }
+    .share-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 10px;
+      word-break: break-all;
+    }
+    #shareLink {
+      color: #00F1FF;
+      text-decoration: none;
+      font-size: 10px;
+      flex: 1;
+      text-align: left;
+    }
+    #statusMessage {
+      margin-top: 20px;
+      font-size: 10px;
+      min-height: 30px;
+      line-height: 1.4;
     }
     #notLaptopMsg {
       color: #fff;
@@ -165,102 +268,404 @@
       <div id="ball"></div>
     </div>
   </div>
-  
+
+  <div id="lobbyOverlay">
+    <div id="lobbyPanel">
+      <h2>Multiplayer Lobby</h2>
+      <p class="lobby-hint">Each player can move with W/S or Arrow keys. Create a room, share the link, and wait for both players to connect.</p>
+      <div class="lobby-actions">
+        <button id="createRoomBtn">Create Room</button>
+        <input id="roomIdInput" placeholder="Room ID" maxlength="8" autocomplete="off" />
+        <button id="joinRoomBtn">Join Room</button>
+      </div>
+      <div id="shareLinkContainer" class="hidden">
+        <p>Share this link with your opponent:</p>
+        <div class="share-row">
+          <a id="shareLink" href="#" target="_blank" rel="noopener"></a>
+          <button id="copyLinkBtn">Copy</button>
+        </div>
+      </div>
+      <div id="statusMessage">Connecting to multiplayer server...</div>
+    </div>
+  </div>
+
   <script>
-    function isLaptop() {
-      return !(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
-    }
-    
-    if (isLaptop()) {
-      const gameBoard = document.getElementById("gameBoard");
-      const leftPaddle = document.getElementById("leftPaddle");
-      const rightPaddle = document.getElementById("rightPaddle");
-      const ball = document.getElementById("ball");
-      const leftScoreEl = document.getElementById("leftScore");
-      const rightScoreEl = document.getElementById("rightScore");
+    (function () {
+      function isLaptop() {
+        return !(/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent));
+      }
+
+      if (!isLaptop()) {
+        document.body.innerHTML = '<div id="notLaptopMsg">Game is only for laptops</div>';
+        return;
+      }
+
+      const WS_PORT = 3000;
+      const lobbyOverlay = document.getElementById('lobbyOverlay');
+      const createRoomBtn = document.getElementById('createRoomBtn');
+      const joinRoomBtn = document.getElementById('joinRoomBtn');
+      const roomIdInput = document.getElementById('roomIdInput');
+      const shareLinkContainer = document.getElementById('shareLinkContainer');
+      const shareLinkEl = document.getElementById('shareLink');
+      const copyLinkBtn = document.getElementById('copyLinkBtn');
+      const statusMessage = document.getElementById('statusMessage');
+
+      const gameBoard = document.getElementById('gameBoard');
+      const leftPaddle = document.getElementById('leftPaddle');
+      const rightPaddle = document.getElementById('rightPaddle');
+      const ball = document.getElementById('ball');
+      const leftScoreEl = document.getElementById('leftScore');
+      const rightScoreEl = document.getElementById('rightScore');
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomFromUrl = urlParams.get('room');
+      if (roomFromUrl) {
+        roomIdInput.value = roomFromUrl.toUpperCase();
+      }
+
+      let socket = null;
+      let socketReady = false;
+      let roomId = roomFromUrl ? roomFromUrl.toUpperCase() : null;
+      let playerRole = null;
+      let isHost = false;
+      let gameInitialized = false;
+      let gameStarted = false;
+      let lastSentPaddleY = null;
+
+      const keys = {};
+      let controlsBound = false;
+
+      const ballSize = 10;
+      const initialSpeedX = 3;
+      const initialSpeedY = 2;
+      const accelerationFactor = 1.06;
+      const paddleSpeed = 7;
+      const maxScore = 11;
 
       let leftScore = 0;
       let rightScore = 0;
       let gameOver = false;
-      
-      const ballSize = 10;
-      const initialSpeedX = 3;
-      const initialSpeedY = 2;
-      
-      let ballX, ballY, ballVelocityX, ballVelocityY;
-      const accelerationFactor = 1.06;
-      const paddleSpeed = 7;
-      
+      let winnerLabel = '';
+      let ballX = gameBoard.clientWidth / 2 - ballSize / 2;
+      let ballY = gameBoard.clientHeight / 2 - ballSize / 2;
+      let ballVelocityX = initialSpeedX;
+      let ballVelocityY = initialSpeedY;
       let leftPaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
       let rightPaddleY = gameBoard.clientHeight / 2 - rightPaddle.offsetHeight / 2;
-      
       let serveCounter = 0;
-      let currentServer = "left";
-      
-      const keys = {};
-      document.addEventListener("keydown", (e) => {
-        keys[e.key] = true;
+      let currentServer = 'left';
+
+      setLobbyControlsDisabled(true);
+
+      roomIdInput.addEventListener('input', () => {
+        roomIdInput.value = roomIdInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
       });
-      document.addEventListener("keyup", (e) => {
-        keys[e.key] = false;
+
+      createRoomBtn.addEventListener('click', () => {
+        if (!socketReady) return;
+        shareLinkContainer.classList.add('hidden');
+        setStatus('Creating room...');
+        socket.send(JSON.stringify({ type: 'createRoom' }));
+        setLobbyControlsDisabled(true);
       });
-      
-      function resetBall() {
+
+      joinRoomBtn.addEventListener('click', () => {
+        if (!socketReady) return;
+        const requestedRoom = roomIdInput.value.trim().toUpperCase();
+        if (!requestedRoom) {
+          setStatus('Enter a room ID before joining.');
+          return;
+        }
+        socket.send(JSON.stringify({ type: 'joinRoom', roomId: requestedRoom }));
+        setStatus(`Joining room ${requestedRoom}...`);
+        setLobbyControlsDisabled(true);
+      });
+
+      copyLinkBtn.addEventListener('click', () => {
+        const link = shareLinkEl.textContent;
+        if (!link) return;
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(link).then(showCopiedState).catch(() => { showCopiedState(false); });
+        } else {
+          const tempInput = document.createElement('input');
+          tempInput.value = link;
+          document.body.appendChild(tempInput);
+          tempInput.select();
+          try {
+            document.execCommand('copy');
+            showCopiedState();
+          } catch (error) {
+            showCopiedState(false);
+          }
+          document.body.removeChild(tempInput);
+        }
+      });
+
+      function showCopiedState(success = true) {
+        if (!success) {
+          setStatus('Unable to copy automatically; copy the link manually.');
+          return;
+        }
+        const previous = copyLinkBtn.textContent;
+        copyLinkBtn.textContent = 'Copied!';
+        copyLinkBtn.disabled = true;
+        setTimeout(() => {
+          copyLinkBtn.textContent = previous;
+          copyLinkBtn.disabled = false;
+        }, 1200);
+      }
+
+      function setStatus(message) {
+        statusMessage.textContent = message;
+      }
+
+      function setLobbyControlsDisabled(disabled) {
+        createRoomBtn.disabled = disabled;
+        joinRoomBtn.disabled = disabled;
+        roomIdInput.disabled = disabled;
+      }
+
+      function updateUrlWithRoom(id) {
+        try {
+          const url = new URL(window.location.href);
+          url.searchParams.set('room', id);
+          window.history.replaceState({}, '', url);
+        } catch (error) {
+          // Ignore history errors (e.g., file protocol)
+        }
+      }
+
+      function buildShareLink(id) {
+        try {
+          const shareUrl = new URL(window.location.href);
+          shareUrl.searchParams.set('room', id);
+          return shareUrl.toString();
+        } catch (error) {
+          return `?room=${id}`;
+        }
+      }
+
+      function connectSocket() {
+        const shouldUseSecure = window.location.protocol === 'https:';
+        const scheme = shouldUseSecure ? 'wss://' : 'ws://';
+        const targetHost = window.location.hostname || 'localhost';
+        socket = new WebSocket(`${scheme}${targetHost}:${WS_PORT}`);
+
+        socket.addEventListener('open', () => {
+          socketReady = true;
+          setStatus('Connected. Create a room or join an existing one.');
+          setLobbyControlsDisabled(false);
+          if (roomFromUrl) {
+            socket.send(JSON.stringify({ type: 'joinRoom', roomId: roomFromUrl.toUpperCase() }));
+            setStatus(`Attempting to join room ${roomFromUrl.toUpperCase()}...`);
+            setLobbyControlsDisabled(true);
+          }
+        });
+
+        socket.addEventListener('message', (event) => {
+          let payload;
+          try {
+            payload = JSON.parse(event.data);
+          } catch (error) {
+            console.error('Invalid message from server', event.data);
+            return;
+          }
+          handleServerMessage(payload);
+        });
+
+        socket.addEventListener('close', () => {
+          socketReady = false;
+          setStatus('Disconnected from server. Refresh the page to reconnect.');
+          setLobbyControlsDisabled(true);
+          lobbyOverlay.classList.remove('hidden');
+        });
+
+        socket.addEventListener('error', () => {
+          setStatus('Connection error. Please refresh the page.');
+        });
+      }
+
+      function handleServerMessage(message) {
+        switch (message.type) {
+          case 'roomCreated':
+            roomId = message.roomId;
+            playerRole = message.role;
+            isHost = true;
+            lastSentPaddleY = null;
+            setStatus(`Room ${roomId} created. Waiting for your opponent...`);
+            shareLinkContainer.classList.remove('hidden');
+            const shareLink = buildShareLink(roomId);
+            shareLinkEl.textContent = shareLink;
+            shareLinkEl.href = shareLink;
+            copyLinkBtn.disabled = false;
+            updateUrlWithRoom(roomId);
+            roomIdInput.value = roomId;
+            break;
+          case 'roomJoined':
+            roomId = message.roomId;
+            playerRole = message.role;
+            isHost = message.role === 'left';
+            lastSentPaddleY = null;
+            setStatus('Joined room. Waiting for the host to start the match...');
+            updateUrlWithRoom(roomId);
+            roomIdInput.value = roomId;
+            break;
+          case 'playerJoined':
+            setStatus('Opponent connected! Preparing the match...');
+            break;
+          case 'roomReady':
+            setStatus('Both players are ready. Starting match...');
+            startGame();
+            break;
+          case 'opponentMove':
+            applyOpponentMove(message.role, message.y);
+            break;
+          case 'stateUpdate':
+            applyStateFromHost(message.state);
+            break;
+          case 'opponentLeft':
+            handleOpponentLeft();
+            break;
+          case 'error':
+            setStatus(message.message || 'Server error.');
+            setLobbyControlsDisabled(false);
+            break;
+          default:
+            console.warn('Unhandled server message', message);
+        }
+      }
+
+      function handleOpponentLeft() {
+        gameOver = true;
+        if (!document.getElementById('winMessage')) {
+          setStatus('Opponent disconnected. Refresh to start a new match.');
+          lobbyOverlay.classList.remove('hidden');
+        }
+      }
+
+      function startGame() {
+        if (gameStarted) return;
+        lobbyOverlay.classList.add('hidden');
+        gameStarted = true;
+        if (!gameInitialized) {
+          initializeGame();
+        }
+      }
+
+      function initializeGame() {
+        if (gameInitialized) return;
+        gameInitialized = true;
+        bindControls();
+        centerGameElements();
+        requestAnimationFrame(update);
+      }
+
+      function centerGameElements() {
+        leftPaddleY = gameBoard.clientHeight / 2 - leftPaddle.offsetHeight / 2;
+        rightPaddleY = leftPaddleY;
         ballX = gameBoard.clientWidth / 2 - ballSize / 2;
         ballY = gameBoard.clientHeight / 2 - ballSize / 2;
-        if (currentServer === "left") {
-          ballVelocityX = initialSpeedX;
-        } else {
-          ballVelocityX = -initialSpeedX;
-        }
-        ballVelocityY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
-        serveCounter++;
-        if (serveCounter % 2 === 0) {
-          currentServer = (currentServer === "left") ? "right" : "left";
-        }
+        updatePaddlePositions();
+        ball.style.left = `${ballX}px`;
+        ball.style.top = `${ballY}px`;
       }
-      
-      function endGame(winner) {
-        gameOver = true;
-        const winDiv = document.createElement("div");
-        winDiv.id = "winMessage";
-        winDiv.textContent = winner + " wins!";
-        document.body.appendChild(winDiv);
-        setTimeout(() => {
-          window.location.href = "index.html";
-        }, 5000);
+
+      function bindControls() {
+        if (controlsBound) return;
+        controlsBound = true;
+        document.addEventListener('keydown', (e) => {
+          if (['ArrowUp', 'ArrowDown', ' '].includes(e.key)) {
+            e.preventDefault();
+          }
+          keys[e.key] = true;
+        });
+        document.addEventListener('keyup', (e) => {
+          keys[e.key] = false;
+        });
+        window.addEventListener('blur', () => {
+          Object.keys(keys).forEach((key) => { keys[key] = false; });
+        });
       }
-      
-      resetBall();
-      
+
       function update() {
-        if (gameOver) return;
-        
-        if (keys["w"] || keys["W"]) {
-          leftPaddleY -= paddleSpeed;
+        if (!gameStarted) return;
+        handleLocalInput();
+        clampPaddles();
+        updatePaddlePositions();
+
+        if (isHost && !gameOver) {
+          advanceBall();
+          updateBallPosition();
+          sendStateUpdate();
         }
-        if (keys["s"] || keys["S"]) {
-          leftPaddleY += paddleSpeed;
+
+        if (!gameOver) {
+          requestAnimationFrame(update);
         }
-        if (keys["ArrowUp"]) {
-          rightPaddleY -= paddleSpeed;
+      }
+
+      function handleLocalInput() {
+        if (!playerRole) return;
+        const upPressed = keys.w || keys.W || keys.ArrowUp;
+        const downPressed = keys.s || keys.S || keys.ArrowDown;
+        let moved = false;
+
+        if (playerRole === 'left') {
+          if (upPressed) {
+            leftPaddleY -= paddleSpeed;
+            moved = true;
+          }
+          if (downPressed) {
+            leftPaddleY += paddleSpeed;
+            moved = true;
+          }
+        } else if (playerRole === 'right') {
+          if (upPressed) {
+            rightPaddleY -= paddleSpeed;
+            moved = true;
+          }
+          if (downPressed) {
+            rightPaddleY += paddleSpeed;
+            moved = true;
+          }
         }
-        if (keys["ArrowDown"]) {
-          rightPaddleY += paddleSpeed;
+
+        if (moved && !isHost) {
+          const y = playerRole === 'left' ? leftPaddleY : rightPaddleY;
+          maybeSendLocalPaddle(y);
         }
-        leftPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - leftPaddle.offsetHeight, leftPaddleY));
-        rightPaddleY = Math.max(0, Math.min(gameBoard.clientHeight - rightPaddle.offsetHeight, rightPaddleY));
-        leftPaddle.style.top = leftPaddleY + "px";
-        rightPaddle.style.top = rightPaddleY + "px";
-        
-        let maxStep = 5;
-        let steps = Math.ceil(Math.max(Math.abs(ballVelocityX), Math.abs(ballVelocityY)) / maxStep);
-        for (let i = 0; i < steps; i++) {
-          let stepX = ballVelocityX / steps;
-          let stepY = ballVelocityY / steps;
+      }
+
+      function clampPaddles() {
+        leftPaddleY = clampY(leftPaddleY);
+        rightPaddleY = clampY(rightPaddleY);
+      }
+
+      function clampY(value) {
+        const limit = gameBoard.clientHeight - leftPaddle.offsetHeight;
+        return Math.max(0, Math.min(limit, value));
+      }
+
+      function updatePaddlePositions() {
+        leftPaddle.style.top = `${leftPaddleY}px`;
+        rightPaddle.style.top = `${rightPaddleY}px`;
+      }
+
+      function updateBallPosition() {
+        ball.style.left = `${ballX}px`;
+        ball.style.top = `${ballY}px`;
+      }
+
+      function advanceBall() {
+        const maxStep = 5;
+        const steps = Math.ceil(Math.max(Math.abs(ballVelocityX), Math.abs(ballVelocityY)) / maxStep);
+
+        for (let i = 0; i < steps; i += 1) {
+          const stepX = ballVelocityX / steps;
+          const stepY = ballVelocityY / steps;
           ballX += stepX;
           ballY += stepY;
-          
+
           if (ballY <= 0) {
             ballY = 0;
             ballVelocityY = -ballVelocityY;
@@ -268,68 +673,164 @@
             ballY = gameBoard.clientHeight - ballSize;
             ballVelocityY = -ballVelocityY;
           }
-          
+
           const rightPaddleX = gameBoard.clientWidth - 20 - rightPaddle.offsetWidth;
-          if (ballX + ballSize >= rightPaddleX && 
-              ballX + ballSize - stepX < rightPaddleX &&
-              ballY + ballSize >= rightPaddleY &&
-              ballY <= rightPaddleY + rightPaddle.offsetHeight) {
-            let paddleCenter = rightPaddleY + rightPaddle.offsetHeight / 2;
-            let ballCenter = ballY + ballSize / 2;
-            let offset = (ballCenter - paddleCenter) / (rightPaddle.offsetHeight / 2);
-            const deflectionFactor = 1.5;
-            ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
-            const maxVerticalSpeed = 5;
-            ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
+          if (
+            ballX + ballSize >= rightPaddleX &&
+            ballX + ballSize - stepX < rightPaddleX &&
+            ballY + ballSize >= rightPaddleY &&
+            ballY <= rightPaddleY + rightPaddle.offsetHeight
+          ) {
+            reflectBall(rightPaddleY, rightPaddle);
             ballVelocityX = -Math.abs(ballVelocityX) * accelerationFactor;
             ballX = rightPaddleX - ballSize;
           }
-          
-          if (ballX <= 20 + leftPaddle.offsetWidth &&
-              ballX - stepX > 20 &&
-              ballY + ballSize >= leftPaddleY &&
-              ballY <= leftPaddleY + leftPaddle.offsetHeight) {
-            let paddleCenter = leftPaddleY + leftPaddle.offsetHeight / 2;
-            let ballCenter = ballY + ballSize / 2;
-            let offset = (ballCenter - paddleCenter) / (leftPaddle.offsetHeight / 2);
-            const deflectionFactor = 1.5;
-            ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
-            const maxVerticalSpeed = 5;
-            ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
+
+          const leftCollisionX = 20 + leftPaddle.offsetWidth;
+          if (
+            ballX <= leftCollisionX &&
+            ballX - stepX > 20 &&
+            ballY + ballSize >= leftPaddleY &&
+            ballY <= leftPaddleY + leftPaddle.offsetHeight
+          ) {
+            reflectBall(leftPaddleY, leftPaddle);
             ballVelocityX = Math.abs(ballVelocityX) * accelerationFactor;
-            ballX = 20 + leftPaddle.offsetWidth;
+            ballX = leftCollisionX;
           }
         }
-        
+
         if (ballX < 0) {
-          rightScore++;
+          rightScore += 1;
           resetBall();
         } else if (ballX + ballSize > gameBoard.clientWidth) {
-          leftScore++;
+          leftScore += 1;
           resetBall();
         }
-      
+
         leftScoreEl.textContent = leftScore;
         rightScoreEl.textContent = rightScore;
-        
-        if (leftScore >= 11) {
-          endGame("Left Player");
-          return;
-        } else if (rightScore >= 11) {
-          endGame("Right Player");
+
+        if (leftScore >= maxScore) {
+          concludeGame('Left Player');
+        } else if (rightScore >= maxScore) {
+          concludeGame('Right Player');
+        }
+      }
+
+      function reflectBall(paddleY, paddleEl) {
+        const paddleCenter = paddleY + paddleEl.offsetHeight / 2;
+        const ballCenter = ballY + ballSize / 2;
+        const offset = (ballCenter - paddleCenter) / (paddleEl.offsetHeight / 2);
+        const deflectionFactor = 1.5;
+        ballVelocityY = ballVelocityY * accelerationFactor + offset * deflectionFactor;
+        const maxVerticalSpeed = 5;
+        ballVelocityY = Math.max(-maxVerticalSpeed, Math.min(maxVerticalSpeed, ballVelocityY));
+      }
+
+      function resetBall() {
+        if (!isHost) return;
+        ballX = gameBoard.clientWidth / 2 - ballSize / 2;
+        ballY = gameBoard.clientHeight / 2 - ballSize / 2;
+        ballVelocityX = currentServer === 'left' ? initialSpeedX : -initialSpeedX;
+        ballVelocityY = initialSpeedY * (Math.random() > 0.5 ? 1 : -1);
+        serveCounter += 1;
+        if (serveCounter % 2 === 0) {
+          currentServer = currentServer === 'left' ? 'right' : 'left';
+        }
+      }
+
+      function concludeGame(winner) {
+        if (gameOver) return;
+        gameOver = true;
+        winnerLabel = winner;
+        sendStateUpdate();
+        showWinMessage(`${winner} wins!`);
+      }
+
+      function showWinMessage(text) {
+        if (document.getElementById('winMessage')) return;
+        const winDiv = document.createElement('div');
+        winDiv.id = 'winMessage';
+        winDiv.textContent = text;
+        document.body.appendChild(winDiv);
+        setTimeout(() => {
+          window.location.href = 'index.html';
+        }, 5000);
+      }
+
+      function sendStateUpdate() {
+        if (!isHost || !socketReady || !roomId || socket.readyState !== WebSocket.OPEN) {
           return;
         }
-        
-        ball.style.left = ballX + "px";
-        ball.style.top = ballY + "px";
-        
-        requestAnimationFrame(update);
+        socket.send(JSON.stringify({
+          type: 'stateUpdate',
+          roomId,
+          state: {
+            ballX,
+            ballY,
+            leftPaddleY,
+            rightPaddleY,
+            leftScore,
+            rightScore,
+            gameOver,
+            winner: winnerLabel,
+          },
+        }));
       }
-      
-      requestAnimationFrame(update);
-    } else {
-      document.body.innerHTML = '<div id="notLaptopMsg">Game is only for laptops</div>';
-    }
+
+      function applyOpponentMove(role, y) {
+        const sanitizedY = clampY(typeof y === 'number' ? y : 0);
+        if (role === 'left') {
+          leftPaddleY = sanitizedY;
+          leftPaddle.style.top = `${leftPaddleY}px`;
+        } else if (role === 'right') {
+          rightPaddleY = sanitizedY;
+          rightPaddle.style.top = `${rightPaddleY}px`;
+        }
+      }
+
+      function applyStateFromHost(state) {
+        if (!state) return;
+        if (typeof state.leftScore === 'number') {
+          leftScore = state.leftScore;
+          leftScoreEl.textContent = leftScore;
+        }
+        if (typeof state.rightScore === 'number') {
+          rightScore = state.rightScore;
+          rightScoreEl.textContent = rightScore;
+        }
+        if (typeof state.leftPaddleY === 'number') {
+          leftPaddleY = clampY(state.leftPaddleY);
+          leftPaddle.style.top = `${leftPaddleY}px`;
+        }
+        if (typeof state.rightPaddleY === 'number') {
+          rightPaddleY = clampY(state.rightPaddleY);
+          rightPaddle.style.top = `${rightPaddleY}px`;
+        }
+        if (typeof state.ballX === 'number' && typeof state.ballY === 'number') {
+          ballX = state.ballX;
+          ballY = state.ballY;
+          updateBallPosition();
+        }
+        if (state.gameOver && !gameOver) {
+          gameOver = true;
+          winnerLabel = state.winner || 'Player';
+          showWinMessage(`${winnerLabel} wins!`);
+        }
+      }
+
+      function maybeSendLocalPaddle(y) {
+        if (!socketReady || !roomId || socket.readyState !== WebSocket.OPEN) return;
+        const sanitized = clampY(y);
+        if (lastSentPaddleY !== null && Math.abs(lastSentPaddleY - sanitized) < 0.5) {
+          return;
+        }
+        lastSentPaddleY = sanitized;
+        socket.send(JSON.stringify({ type: 'paddleMove', roomId, y: sanitized }));
+      }
+
+      connectSocket();
+    })();
   </script>
 </body>
 </html>
